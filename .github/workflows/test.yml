@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       # clonim revision providing the language features nitomic uses
-      CLONIM_REF: nitomic-support
+      CLONIM_REF: main
     steps:
       - uses: actions/checkout@v4
 

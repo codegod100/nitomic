@@ -114,9 +114,8 @@ nitomic uses Clojure features that clonim gained for this port:
 - `ex-data`;
 - a set of collection functions.
 
-They are on the `nitomic-support` branch of clonim
-([codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1)) until it
-merges.
+They are in clonim `main` as of
+[codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1).
 
 ## Testing
 
