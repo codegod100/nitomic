@@ -18,3 +18,7 @@ requires "https://github.com/codegod100/clonim"
 
 task test, "Run the test programs under clonim and diff their output":
   exec "test/run.sh"
+
+task example, "Run Datomic's getting-started example (examples/seattle) under clonim":
+  let clonim = getEnv("CLONIM", "clonim")
+  exec clonim & " run examples/seattle/getting_started.clj --source-path src"
