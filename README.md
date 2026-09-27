@@ -24,6 +24,18 @@ clonim run   hello.clj --source-path path/to/nitomic/src   # compile and run
 clonim build hello.clj --source-path path/to/nitomic/src   # native binary
 ```
 
+## Installing with Nimble
+
+nitomic is a Nimble package. Installing it also installs clonim:
+
+```bash
+nimble install https://github.com/codegod100/nitomic
+clonim run hello.clj --source-path "$(nimble path nitomic)"
+```
+
+From a checkout, `nimble install` installs the working tree, and `nimble test`
+runs the test suite (see [Testing](#testing)) with the `clonim` on `PATH`.
+
 ## What "port" means here
 
 The Datomic Pro 1.0.7705 distribution is compiled JVM bytecode: the peer
