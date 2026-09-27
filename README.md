@@ -35,6 +35,8 @@ clonim run hello.clj --source-path "$(nimble path nitomic)"
 
 From a checkout, `nimble install` installs the working tree, and `nimble test`
 runs the test suite (see [Testing](#testing)) with the `clonim` on `PATH`.
+`nimble example` runs Datomic's getting-started walkthrough
+(`examples/seattle/getting_started.clj`); set `CLONIM` to use another clonim.
 
 ## What "port" means here
 
