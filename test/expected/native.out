@@ -1,0 +1,5 @@
+#{["a" 70] ["b" 35]}
+:bank/insufficient-funds
+[[:db/add [:account/id "a"] :account/balance 69] [:db/add [:account/id "b"] :account/balance 36]]
+["a"]
+40
