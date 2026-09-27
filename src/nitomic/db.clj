@@ -174,10 +174,12 @@
   "Resolve an attribute identifier to the id of an installed attribute."
   [db a]
   (let [id (entid db a)]
-    (if (and id (get-in db [:attrs id]))
-      id
-      (error :db.error/not-an-attribute
-             (str "Unable to resolve attribute: " (pr-str a)) {:attr a}))))
+    (cond
+      (nil? id) (error :db.error/not-an-entity
+                       (str "Unable to resolve entity: " (pr-str a)) {:entity a})
+      (get-in db [:attrs id]) id
+      :else (error :db.error/not-an-attribute
+                   (str (pr-str a) " is not an attribute") {:attr a}))))
 
 (defn reverse-attr?
   "True for :ns/_name, the reverse spelling of a reference attribute."

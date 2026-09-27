@@ -1,0 +1,39 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      # clonim revision providing the language features nitomic uses
+      CLONIM_REF: nitomic-support
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out clonim
+        uses: actions/checkout@v4
+        with:
+          repository: codegod100/clonim
+          ref: ${{ env.CLONIM_REF }}
+          path: clonim
+
+      - name: Install Nim
+        run: |
+          curl --fail --show-error --silent \
+            https://nim-lang.org/choosenim/init.sh -o /tmp/choosenim-init.sh
+          CHOOSENIM_CHOOSE_VERSION=2.2.12 sh /tmp/choosenim-init.sh -y
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libpcre3
+
+      - name: Build clonim
+        run: |
+          cd clonim
+          nim c --hints:off --warnings:off -o:bin/clonim src/clonim.nim
+
+      - name: Run tests
+        run: CLONIM=$PWD/clonim/bin/clonim test/run.sh

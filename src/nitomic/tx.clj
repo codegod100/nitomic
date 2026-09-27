@@ -58,6 +58,19 @@
                    ops vs))))
      [] m)))
 
+(declare expand)
+
+(defn- call-tx-fn
+  "A transaction function: an entity whose :db/fn holds a Clojure fn of the
+  database and the call's arguments, returning more transaction data."
+  [db op args]
+  (let [e (when (keyword? op) (db/entid db op))
+        f (when e (first (keys (get-in db [:eavt e (db/entid db :db/fn)]))))]
+    (if (fn? f)
+      (expand db (apply f db args))
+      (db/error :db.error/not-a-data-function
+                (str "Unable to resolve data function: " (pr-str op)) {:op op}))))
+
 (defn- expand-list [db [op & args]]
   (case op
     :db/add
@@ -71,8 +84,7 @@
     [[:retract-entity (first args)]]
     (:db.fn/cas :db/cas)
     (let [[e a old new] args] [[:cas e (db/attr-id db a) old new]])
-    (db/error :db.error/not-a-data-function
-              (str "Unable to resolve data function: " (pr-str op)) {:op op})))
+    (call-tx-fn db op args)))
 
 (defn expand
   "Primitive operations for transaction data: [:add e a v], [:retract e a v],
@@ -253,7 +265,7 @@
   [w e]
   (let [own (for [[a vs] (get-in w [:eavt e]) [v _] vs] [e a v])
         refs (for [[a es] (get-in w [:vaet e]) [re _] es] [re a e])
-        comps (for [[a v] own :when (db/component? w a)] v)]
+        comps (for [[_ a v] own :when (db/component? w a)] v)]
     (concat own refs (mapcat #(entity-datoms w %) comps))))
 
 (defn- apply-op [st [op e a v nv]]

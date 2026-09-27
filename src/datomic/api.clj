@@ -64,7 +64,7 @@
   (let [conn (get @databases (db-name uri))]
     (when-not conn
       (throw (ex-info (str "Could not find " (db-name uri) " in catalog")
-                      {:db/error :peer/db-not-found})))
+                      {:db/error :db.error/db-not-found})))
     conn))
 
 (defn release [conn] nil)
@@ -225,6 +225,19 @@
   "Make f callable from query clauses as sym (see nitomic.query)."
   [sym f]
   (query/register-fn! sym f))
+
+(defn function
+  "A database function. On the JVM this compiles {:lang :params :code}; a
+  native program cannot compile code at runtime, so here it takes the fn
+  itself (or a map holding it under :fn) and returns it for :db/fn."
+  [f]
+  (if (map? f) (:fn f) f))
+
+(defn invoke
+  "Invoke the database function stored under an ident."
+  [db ident & args]
+  (let [f (first (keys (get-in db [:eavt (ndb/entid db ident) (ndb/entid db :db/fn)])))]
+    (apply f args)))
 
 (defn pull [db pattern eid] (npull/pull db pattern eid))
 (defn pull-many [db pattern eids] (npull/pull-many db pattern eids))

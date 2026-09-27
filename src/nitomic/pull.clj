@@ -22,8 +22,8 @@
     (if (= k :db/id)
       {:key k :db-id? true :as (get opts :as k)}
       (let [rev? (db/reverse-attr? k)
-            a (db/attr-id db (if rev? (db/forward-attr k) k))]
-        {:key k :attr a :reverse? rev?
+            a (db/entid db (if rev? (db/forward-attr k) k))]
+        {:key k :attr a :reverse? rev? :missing? (nil? (db/attr db a))
          :as (get opts :as k)
          :limit (if (contains? opts :limit) (get opts :limit) default-limit)
          :has-default (contains? opts :default)
@@ -50,10 +50,13 @@
   (sort-by identity (fn [a b] (try (compare a b) (catch Exception _ 0))) vs))
 
 (defn- attr-value
-  "The value an attribute contributes to an entity's pull result, or ::none."
+  "The value an attribute contributes to an entity's pull result, or ::none.
+  An attribute the database does not know contributes nothing."
   [db spec sub e seen depth]
   (let [a (:attr spec)]
-    (if (:reverse? spec)
+    (cond
+      (:missing? spec) ::none
+      (:reverse? spec)
       (let [sources (sort (keys (get-in db [:vaet e a])))]
         (if (empty? sources)
           ::none
@@ -61,6 +64,7 @@
             (ref-value db spec sub (first sources) seen depth)
             (vec (map #(ref-value db spec sub % seen depth)
                       (limited (:limit spec) sources))))))
+      :else
       (let [vs (sorted-vals (keys (get-in db [:eavt e a])))]
         (cond
           (empty? vs) ::none

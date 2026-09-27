@@ -470,7 +470,8 @@
     median (let [s (vec (sort vals)) n (count s)]
              (if (odd? n)
                (nth s (quot n 2))
-               (/ (+ (nth s (dec (quot n 2))) (nth s (quot n 2))) 2)))
+               (let [sum (+ (nth s (dec (quot n 2))) (nth s (quot n 2)))]
+               (if (and (integer? sum) (even? sum)) (quot sum 2) (/ sum 2.0)))))
     distinct (set vals)
     rand (vec (repeatedly (first args) #(rand-nth-of vals)))
     sample (vec (take (first args) (distinct vals)))

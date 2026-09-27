@@ -1,0 +1,117 @@
+create again: false
+schema tempids: (17592186045417 17592186045418 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88)
+attribute ids: (73 74 87)
+enum ids: (4 4)
+attribute: (73 :person/email :db.type/string :db.cardinality/one false true :db.unique/identity false false false)
+attribute component: (83 :person/phone :db.type/ref :db.cardinality/many false false nil true false false)
+ids: [17592186045420 17592186045424 17592186045425]
+tx-data count: 33
+tx datom: [17592186045420 :person/name true true]
+basis-t: 1003
+t<->tx: [1234 13194139534312]
+lookup ref: 17592186045424
+ident: [:person/name 17592186045417]
+upsert keeps id: true
+upsert tx-data: ([:person/age 40 false] [:person/age 41 true])
+lookup ref in e: #{:cc}
+lookup ref in v: ("Carol")
+unique value conflict: :db.error/unique-conflict
+wrong type: :db.error/wrong-type-for-attribute
+unknown attribute: :db.error/not-an-entity
+cas ok: 3
+cas failed: :db.error/cas-failed
+age after cas: 42
+entity keys: #{:person/active :person/address :person/age :person/born :person/email :person/friend :person/height :person/name :person/nick :person/phone :person/ssn :person/status :person/token}
+entity values: ["Alice" 34 1.7 true #{:al :ally} :status/active #uuid "5b0d8c0e-1111-4c2b-9f00-000000000001"]
+entity inst: 641520000000
+component: "1 Main St"
+component many: #{"555-1" "555-2"}
+reverse ref: #{"Carol"}
+reverse friends: #{"Bob" "Carol"}
+component reverse: "Alice"
+entity db: true
+entity id: 17592186045420
+missing attr: nil
+entity get default: :none
+touch: "Alice"
+entity by ident: :person/email
+pull attrs: {:person/age 34, :person/name "Alice", :person/nick [:al :ally]}
+pull db/id: true
+pull enum: {:person/status {:db/ident :status/active}}
+pull nested: {:person/friend [{:person/name "Alice"}], :person/name "Bob"}
+pull reverse: {:person/_parent [{:person/name "Carol"}], :person/name "Alice"}
+pull component *: {:person/address {:address/street "1 Main St"}, :person/name "Alice", :person/phone #{"555-1" "555-2"}}
+pull as/default/limit: {"name" "Bob", :person/parent :none}
+pull legacy limit: 1
+pull recursive: {:person/name "Dave", :person/parent {:person/name "Carol", :person/parent {:person/name "Alice"}}}
+pull recursion limit: {:person/name "Dave", :person/parent {:person/name "Carol"}}
+pull lookup ref: {:person/age 12}
+pull nothing: nil
+pull-many: [{:person/name "Alice"} {:person/name "Bob"} {:person/name "Carol"}]
+scalar: "Bob"
+tuple: ["Bob" 42]
+rel: (["Alice" 34] ["Bob" 42] ["Carol" 12] ["Dave" 8])
+count: 4
+aggregates: ([8 42 96 4])
+avg: 24.0
+median: 23
+grouped: (["Alice" 1] ["Carol" 1])
+with: 1.7
+distinct agg: #{:al :ally :cc}
+min n: [8 12]
+not: ("Alice" "Bob")
+not-join: ("Bob" "Dave")
+or: ("Bob" "Carol")
+or-join: ("Alice" "Carol")
+predicate: ("Alice" "Bob")
+fn binding: (["Alice" 35] ["Bob" 43] ["Carol" 13] ["Dave" 9])
+fn tuple binding: ([1 2])
+fn coll binding: (0 1 2)
+fn rel binding: ([1 2] [3 4])
+get-else: (["Alice" :none] ["Bob" :none] ["Carol" 17592186045420] ["Dave" 17592186045425])
+missing?: ()
+ground: 42
+str fn: "Bob!"
+map query: (["Carol"])
+d/query: ("Alice" "Bob" "Carol" "Dave")
+two sources: (["Alice" 10] ["Bob" 20])
+attribute var: (:person/age :person/email :person/friend :person/name :person/status)
+recursive rule: ("Alice" "Carol")
+rule both unbound: ([17592186045425 17592186045420] [17592186045426 17592186045420] [17592186045426 17592186045425])
+cyclic rule: ("Alice" "Bob" "Carol")
+empty result: ()
+empty scalar: nil
+retract and replace: ([:person/age 34 false] [:person/age 35 true] [:person/nick :al false])
+retract all values: nil
+retractEntity datoms: 21
+entity gone: nil
+components gone: nil
+references gone: ["Dave"]
+as-of t: 34
+as-of tx: 34
+as-of-t: true
+since: ()
+history of age: ([34 false] [34 true] [35 false] [35 true])
+is-history: [true false]
+with: ["ok" nil]
+filter: ("Carol" "Dave")
+datoms eavt: ([:person/email "bob@example.com"] [:person/name "Bob"] [:person/age 42] [:person/status 17592186045418])
+datoms aevt: ("Bob" "Carol" "Dave")
+datoms avet: ("Bob" "Carol" "Dave")
+datoms avet prefix: (17592186045424)
+datoms vaet: ("Dave")
+seek-datoms: ("Carol" "Dave")
+index-range: ("Bob" "Carol")
+datom seq: ["Bob" "Bob" true]
+log size: 9
+log t: true
+log range: 2
+log data: 72
+tempid parts: (:db.part/user :db.part/db)
+tempid idx: -42
+squuid: true
+entid-at: 17592186045416
+part: [4 3]
+database names: "features"
+delete: true
+connect deleted: :db.error/db-not-found
