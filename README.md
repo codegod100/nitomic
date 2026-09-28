@@ -91,8 +91,8 @@ So the ids a program sees are the ids Datomic would give it.
 - **Storage is memory or SQLite.** `datomic:sql://<name>?jdbc:sqlite:<path>`
   keeps databases in a SQLite file (see [Durable storage](#durable-storage)).
   Every other URI protocol (`mem`, `dev`, `ddb`, …) names an in-process
-  database that is gone when the process exits. There is no separate
-  transactor process: each process takes SQLite's write lock to transact.
+  database that is gone when the process exits. The transactor is optional:
+  without one, each process takes SQLite's write lock to transact.
 - **No runtime code compilation.** Database functions can't be Clojure source
   strings. `:db/fn` holds a Clojure fn, which `d/function` passes through.
   Query functions are found in a built-in table of `clojure.core` and string
@@ -135,15 +135,49 @@ catalog in the file.
   releasing the lock. So each process acts as its own transactor, one at a
   time.
 - **Seeing other writers.** `d/db`, `sync` and reading a `tx-report-queue`
-  pick up other writers' transactions. Those transactions reach the queue as
-  reports with empty `:tempids`.
+  pick up other writers' transactions. Their reports include `:tempids`,
+  which are stored with each transaction.
 - **Transaction functions.** A `:db/fn` holds a Clojure fn, which can't be
   written to a file. Installing one in a stored database fails with
   `:db.error/not-storable`.
 - **Releasing.** `release` drops a stored connection from the cache, so the
   next `connect` rebuilds it from the file.
+- **Transactor.** Running a transactor makes it the only process that
+  writes the log (see [Running a transactor](#running-a-transactor)).
 - **Requirements.** Storage uses clonim's `clonim.sqlite`, which loads
   `libsqlite3` when a stored database is first used.
+
+### Running a transactor
+
+```bash
+clonim build script/transactor.clj --source-path src -o nitomic-transactor
+./nitomic-transactor /var/lib/app/datomic.db     # or datomic:sql://*?jdbc:sqlite:<path>
+```
+
+`nitomic.transactor` serves every database in a storage file. While it
+runs, it records a heartbeat in the file every second.
+
+- **Queued transactions.** While a transactor's heartbeat is fresh,
+  `d/transact` doesn't write the log. It queues the transaction data in the
+  file and returns a future at once. The transactor takes queued
+  transactions in order. For each one, in a single SQLite transaction, it
+  runs it, appends it to the log, and records the outcome. Dereferencing the
+  future waits for that outcome, then returns the report or throws the
+  transactor's error.
+- **Clock.** The transactor stamps `:db/txInstant` with its own clock, as
+  Datomic's does.
+- **Only one at a time.** A second transactor refuses to start while one is
+  alive (`:db.error/transactor-running`).
+- **When it stops.** After three missed heartbeats (3 s), peers go back to
+  writing the log themselves, so the databases stay writable. A transaction
+  still waiting in the queue at that point is withdrawn and fails with
+  `:db.error/transactor-unavailable`.
+- **What can be queued.** Transaction data crosses processes as EDN, with
+  tempids and datoms encoded. A fn can't be sent and fails with
+  `:db.error/not-storable`.
+- **Programmatic use.** `nitomic.transactor/run` serves a file until its
+  `:stop?` fn returns true. `start`, `step!` and `stop!` drive it one batch at
+  a time.
 
 ## Layout
 
@@ -156,7 +190,8 @@ catalog in the file.
 | `src/nitomic/query.clj` | Datalog, rules and aggregates |
 | `src/nitomic/pull.clj` | the pull API |
 | `src/nitomic/entity.clj` | lazy entities (a `deftype` over `ILookup`/`Seqable`) |
-| `src/nitomic/storage.clj` | durable storage: the SQLite catalog and transaction log, replay |
+| `src/nitomic/storage.clj` | durable storage: the SQLite catalog, transaction log and queue, replay |
+| `src/nitomic/transactor.clj` | the transactor: serves a storage's queue and writes its log |
 | `src/nitomic/types.clj` | datoms and tempids |
 | `src/nitomic/bootstrap.clj` | Datomic's bootstrap datoms |
 
@@ -179,7 +214,7 @@ nitomic uses Clojure features that clonim gained for this port:
 
 They are in clonim `main` as of
 [codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1). Durable
-storage also needs `clonim.sqlite`, from
+storage and the transactor also need `clonim.sqlite` and `Thread/sleep`, from
 [codegod100/clonim#18](https://github.com/codegod100/clonim/pull/18).
 
 ## Testing
@@ -196,7 +231,9 @@ against `test/expected/`:
 - `test/features.clj` goes through the rest of the API, including error cases;
 - `test/native.clj` covers the native-only extensions;
 - `test/storage.clj` covers durable storage: replay, two connections sharing
-  a file, and the catalog.
+  a file, and the catalog;
+- `test/transactor.clj` drives the transactor step by step: queued
+  transactions, errors, tempids, stopping and withdrawal.
 
 The expected outputs of the first two were recorded on the JVM against Datomic
 Pro 1.0.7705 by `script/reference.sh`. Re-record them from any distribution

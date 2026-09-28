@@ -95,6 +95,7 @@
                     :name name
                     :state (atom (storage/load-db s name))
                     :queues (atom [])
+                    :recent (atom {})
                     :store s}]
           (swap! sql-conns assoc [path name] conn)
           conn))))
@@ -125,21 +126,34 @@
 (defn- publish! [conn report]
   (doseq [q @(:queues conn)] (swap! q conj report)))
 
+(def ^:private recent-reports
+  "How many reports of caught-up transactions a connection keeps, for the
+  transactions it queued to find their own."
+  64)
+
+(defn- remember! [conn report]
+  (swap! (:recent conn)
+         (fn [m]
+           (let [m (assoc m (:basis-t (:db-after report)) report)]
+             (if (> (count m) recent-reports) (dissoc m (apply min (keys m))) m)))))
+
 (defn- catch-up!
-  "Apply the transactions other connections have stored since this one's
-  basis, reporting each to its tx-report-queues as Datomic delivers every
-  transaction to every peer."
+  "Apply the transactions stored since this connection's basis, by other
+  connections or by the transactor, reporting each to its tx-report-queues
+  as Datomic delivers every transaction to every peer."
   [conn]
   (when-let [s (:store conn)]
     (let [state (:state conn)]
       (doseq [rec (storage/records-after s (:name conn) (:basis-t @state))]
         (let [before @state
-              after (ndb/apply-tx-record before rec)]
+              after (ndb/apply-tx-record before rec)
+              report {:db-before before
+                      :db-after after
+                      :tx-data (mapv types/datom (:data rec))
+                      :tempids (:tempids rec {})}]
           (reset! state after)
-          (publish! conn {:db-before before
-                          :db-after after
-                          :tx-data (mapv types/datom (:data rec))
-                          :tempids {}})))))
+          (remember! conn report)
+          (publish! conn report)))))
   conn)
 
 (defn db
@@ -165,26 +179,70 @@
 ;; ------------------------------------------------------------ transactions
 (defn- now [] (java.util.Date.))
 
+(defn- await-queued
+  "The report of a transaction queued for the transactor, once it has been
+  processed; throws what it failed with. If the transactor goes away first,
+  the transaction is withdrawn and fails with :db.error/transactor-unavailable."
+  [conn id]
+  (let [s (:store conn)
+        {:keys [status result]}
+        (loop []
+          (or (storage/queue-result s id)
+              (if (and (not (storage/transactor-alive? s)) (storage/cancel! s id))
+                (throw (ex-info "The transactor stopped before processing the transaction"
+                                {:db/error :db.error/transactor-unavailable}))
+                (do (Thread/sleep 1) (recur)))))]
+    (storage/forget! s id)
+    (if (= status :failed)
+      (throw (ex-info (:message result) (or (:data result) {})))
+      (do
+        (catch-up! conn)
+        (or (get @(:recent conn) (:t result))
+            (storage/report-at s (:name conn) (:t result)))))))
+
+(defn- queued-future
+  "A future of a queued transaction's report, waited for on first deref."
+  [conn id]
+  (let [outcome (atom nil)
+        settle (fn []
+                 (when-not @outcome
+                   (reset! outcome (try [(await-queued conn id) nil]
+                                        (catch Exception e [nil e]))))
+                 (let [[v e] @outcome] (if e (throw e) v)))]
+    (reify
+      clojure.lang.IDeref
+      (deref [_] (settle))
+      java.util.concurrent.Future
+      (get [_] (settle))
+      (isDone [_] (boolean (or @outcome (storage/queue-result (:store conn) id))))
+      (isCancelled [_] false))))
+
 (defn transact
-  "Submit a transaction. Returns a future of the transaction report."
+  "Submit a transaction. Returns a future of the transaction report.
+
+  For a stored database with a transactor running, the transaction is
+  queued for it and the future waits for the transactor. Otherwise the
+  connection writes the log itself."
   [conn tx-data]
   (let [state (:state conn)
         s (:store conn)]
     (try
-      (let [report
-            (if s
-              ;; Holding the write lock, catch up with other writers, then
-              ;; store this transaction before anyone else can write.
-              (storage/with-write-lock s
-                (fn []
-                  (catch-up! conn)
-                  (let [report (tx/transact @state tx-data (now))]
-                    (storage/append! s (:name conn) (:db-after report))
-                    report)))
-              (tx/transact @state tx-data (now)))]
-        (reset! state (:db-after report))
-        (publish! conn report)
-        (realized-future report nil))
+      (if (and s (storage/transactor-alive? s))
+        (queued-future conn (storage/enqueue! s (:name conn) tx-data))
+        (let [report
+              (if s
+                ;; Holding the write lock, catch up with other writers, then
+                ;; store this transaction before anyone else can write.
+                (storage/with-write-lock s
+                  (fn []
+                    (catch-up! conn)
+                    (let [report (tx/transact @state tx-data (now))]
+                      (storage/append! s (:name conn) report)
+                      report)))
+                (tx/transact @state tx-data (now)))]
+          (reset! state (:db-after report))
+          (publish! conn report)
+          (realized-future report nil)))
       (catch Exception e
         (realized-future nil e)))))
 

@@ -55,7 +55,7 @@
 ;; other's commits, and transacting first takes the other's into account
 (def queue (d/tx-report-queue peer-b))
 @(d/transact conn [{:person/name "Barbara"}])
-(println (count (seq queue)) (:tempids (.poll queue)))              ; delivered, no tempids
+(println (count (seq queue)) (count (:tempids (.poll queue))))      ; delivered, with its tempid
 (println (d/q '[:find ?n . :where [?e :person/name "Barbara"] [?e :person/name ?n]]
               (d/db peer-b)))
 (def rb @(d/transact peer-b [{:db/id "e" :person/name "Edsger"}]))

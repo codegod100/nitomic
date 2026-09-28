@@ -13,6 +13,7 @@ native output must match the recorded JVM output line for line.
 | `test/features.clj` | the rest of the API, including error cases | recorded on Datomic Pro |
 | `test/native.clj` | nitomic-only extensions, such as `d/register-fn!` | written for nitomic |
 | `test/storage.clj` | durable storage in SQLite: replay, two connections sharing a file, the catalog | written for nitomic |
+| `test/transactor.clj` | the transactor: queued transactions, errors, tempids, stopping and withdrawal | written for nitomic |
 
 ## Running the tests
 
@@ -31,6 +32,7 @@ ok   getting_started
 ok   features
 ok   native
 ok   storage
+ok   transactor
 ```
 
 CI (`.github/workflows/test.yml`) builds clonim from its `main` branch with
