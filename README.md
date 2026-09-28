@@ -24,6 +24,16 @@ clonim run   hello.clj --source-path path/to/nitomic/src   # compile and run
 clonim build hello.clj --source-path path/to/nitomic/src   # native binary
 ```
 
+## Documentation
+
+The [nitomic book](book/) covers installation and walks through Datomic's
+getting-started example step by step. Build it with
+[mdBook](https://rust-lang.github.io/mdBook/):
+
+```bash
+mdbook serve book     # or: mdbook build book
+```
+
 ## Installing with Nimble
 
 nitomic is a Nimble package. Installing it also installs clonim:
