@@ -114,4 +114,7 @@ which SQLite's locking knows nothing about.
 
 The repository's `deploy/modal/` directory does all of this. It has a Modal
 app with an HTTP API over nitomic peers and an optional transactor, deployed
-with `modal deploy deploy/modal/app.py`.
+with `modal deploy deploy/modal/app.py`. With [Neon](https://neon.com) as the
+PostgreSQL, see `deploy/modal/README.md`: use Neon's direct (not pooled)
+connection string, and deploy without the transactor
+(`NITOMIC_TRANSACTOR=0`) if the compute should scale to zero.

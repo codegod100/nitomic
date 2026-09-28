@@ -9,6 +9,7 @@ storage.
 """
 
 import os
+import subprocess
 import uuid
 
 import pytest
@@ -93,10 +94,50 @@ def test_peer_restarts_and_replays(client, peer, db):
     assert r.status_code == 200 and r.text.startswith("17592186045")
 
 
+def drop_connections():
+    """What a Neon compute scaling to zero does to its clients."""
+    url = api.storage_from_env()[len("jdbc:"):]
+    subprocess.run(["psql", url, "-X", "-q", "-c",
+                    "select pg_terminate_backend(pid) from pg_stat_activity"
+                    " where datname = current_database() and pid <> pg_backend_pid()"],
+                   check=True, capture_output=True)
+
+
+needs_postgres = pytest.mark.skipif(
+    not api.storage_from_env().startswith("jdbc:postgresql:"),
+    reason="drops connections on a PostgreSQL server")
+
+
+@needs_postgres
+def test_reads_reconnect_after_the_server_drops_the_connection(client, db):
+    drop_connections()
+    r = client.post(f"/db/{db}/q", content="[:find (count ?e) . :where [?e :person/name]]")
+    assert r.status_code == 200, r.text
+
+
+@needs_postgres
+def test_writes_report_a_dropped_connection_instead_of_retrying(client, db):
+    drop_connections()
+    r = client.post(f"/db/{db}/transact", content='[{:person/name "Radia"}]')
+    assert r.status_code == 503 and "may or may not" in r.text
+    # the peer reconnected; checking, then resending, works
+    q = '[:find ?e . :where [?e :person/name "Radia"]]'
+    assert client.post(f"/db/{db}/q", content=q).text == "nil"
+    assert client.post(f"/db/{db}/transact", content='[{:person/name "Radia"}]').status_code == 200
+    assert client.post(f"/db/{db}/q", content=q).text.startswith("17592186045")
+
+
 def test_storage_from_env(monkeypatch):
     monkeypatch.delenv("NITOMIC_STORAGE", raising=False)
-    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@h:5432/d?sslmode=require")
-    assert api.storage_from_env() == "jdbc:postgresql://u:p@h:5432/d?sslmode=require"
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@ep-x.aws.neon.tech/d?sslmode=require")
+    assert api.storage_from_env() == (
+        "jdbc:postgresql://u:p@ep-x.aws.neon.tech/d?sslmode=require&connect_timeout=15"
+        "&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3")
+    # settings already in the URL are kept
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/d?connect_timeout=5&keepalives=1"
+                                       "&keepalives_idle=1&keepalives_interval=1&keepalives_count=1")
+    assert api.storage_from_env() == ("jdbc:postgresql://u:p@h/d?connect_timeout=5&keepalives=1"
+                                      "&keepalives_idle=1&keepalives_interval=1&keepalives_count=1")
     monkeypatch.setenv("DATABASE_URL", "mysql://nope")
     with pytest.raises(RuntimeError):
         api.storage_from_env()
