@@ -111,3 +111,7 @@ which SQLite's locking knows nothing about.
 - **Transactor (optional).** Run `nitomic-transactor` as a single
   always-on function (`min_containers=1`, `max_containers=1`). If Modal
   restarts it, peers write the log themselves until it is back.
+
+The repository's `deploy/modal/` directory does all of this. It has a Modal
+app with an HTTP API over nitomic peers and an optional transactor, deployed
+with `modal deploy deploy/modal/app.py`.

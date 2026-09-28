@@ -53,3 +53,16 @@ jobs:
         env:
           NITOMIC_TEST_STORAGE: jdbc:postgresql://localhost:5432/postgres?user=postgres&password=postgres
         run: CLONIM=$PWD/clonim/bin/clonim test/run.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test the HTTP API (deploy/modal) over PostgreSQL
+        env:
+          NITOMIC_STORAGE: jdbc:postgresql://localhost:5432/postgres?user=postgres&password=postgres
+        run: |
+          clonim/bin/clonim build script/peer_server.clj --source-path src -o nitomic-peer
+          pip install fastapi httpx pytest
+          cd deploy/modal
+          NITOMIC_PEER=$GITHUB_WORKSPACE/nitomic-peer python -m pytest -q -p no:cacheprovider test_api.py
