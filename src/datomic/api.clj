@@ -191,7 +191,7 @@
               (if (and (not (storage/transactor-alive? s)) (storage/cancel! s id))
                 (throw (ex-info "The transactor stopped before processing the transaction"
                                 {:db/error :db.error/transactor-unavailable}))
-                (do (Thread/sleep 1) (recur)))))]
+                (do (storage/wait! s 1000) (recur)))))]
     (storage/forget! s id)
     (if (= status :failed)
       (throw (ex-info (:message result) (or (:data result) {})))
@@ -267,19 +267,28 @@
   "A queue that receives the report of every transaction on the connection
   from now on. Supports .poll, .take, .peek, .isEmpty, .size and .clear.
   For a stored database, reading the queue first picks up what other
-  connections have committed."
+  connections have committed, and on PostgreSQL .take waits for the next
+  transaction when there is none yet."
   [conn]
   (let [items (atom [])
         pending (fn [] (catch-up! conn) @items)
         pop! (fn []
                (let [x (first (pending))]
                  (swap! items #(vec (rest %)))
-                 x))]
+                 x))
+        s (:store conn)
+        take! (fn []
+                (if (and s (storage/push? s))
+                  (loop []
+                    (if (seq (pending))
+                      (pop!)
+                      (do (storage/wait! s 1000) (recur))))
+                  (pop!)))]
     (swap! (:queues conn) conj items)
     (reify
       java.util.concurrent.BlockingQueue
       (poll [_] (pop!))
-      (take [_] (pop!))
+      (take [_] (take!))
       (peek [_] (first (pending)))
       (isEmpty [_] (empty? (pending)))
       (size [_] (count (pending)))

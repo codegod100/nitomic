@@ -1,10 +1,11 @@
 # Differences from Datomic
 
-- **Storage is memory or SQLite.** `datomic:sql://<name>?jdbc:sqlite:<path>`
-  keeps databases in a SQLite file (see [Durable storage](storage.md)).
-  Every other URI protocol (`mem`, `dev`, `ddb`, …) names an in-process
-  database that is gone when the process exits. The transactor is optional:
-  without one, each process takes SQLite's write lock to transact.
+- **Storage is memory, SQLite or PostgreSQL.** `datomic:sql` URIs with a
+  `jdbc:sqlite:` or `jdbc:postgresql:` URL keep databases durably (see
+  [Durable storage](storage.md)). Every other URI protocol (`mem`,
+  `dev`, `ddb`, …) names an in-process database that is gone when the
+  process exits. The transactor is optional: without one, each process
+  takes the storage's write lock to transact.
 - **No runtime code compilation.** Database functions can't be Clojure source
   strings. `:db/fn` holds a Clojure fn, which `d/function` passes through.
   Query functions are found in a built-in table of `clojure.core` and string

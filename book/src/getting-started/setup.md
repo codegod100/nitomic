@@ -30,7 +30,8 @@ what you transact against and take database values from.
 
 > **nitomic:** `datomic:mem` and every other protocol except `sql` name an
 > in-memory database in the same process. To keep a database on disk, use a
-> SQLite URI such as `datomic:sql://seattle?jdbc:sqlite:seattle.db` (see
+> SQLite URI such as `datomic:sql://seattle?jdbc:sqlite:seattle.db`, or a
+> `jdbc:postgresql:` one to share it between machines (see
 > [Durable storage](../reference/storage.md)).
 
 ## Reading EDN with tempid literals

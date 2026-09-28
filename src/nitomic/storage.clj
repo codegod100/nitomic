@@ -1,104 +1,220 @@
-;; Durable storage in SQLite, for datomic:sql://<name>?jdbc:sqlite:<path>.
+;; Durable storage in SQLite or PostgreSQL, for
+;; datomic:sql://<name>?jdbc:sqlite:<path> and
+;; datomic:sql://<name>?jdbc:postgresql://<host>/<db>?user=...&password=...
 ;;
-;; A storage file holds any number of databases, like a Datomic SQL
-;; storage. Each committed transaction is one row of the log: the datoms it
-;; produced and the id counters after it, as EDN. A connection rebuilds its
-;; database by replaying those rows onto the bootstrap database
+;; A storage holds any number of databases, like a Datomic SQL storage.
+;; Each committed transaction is one row of the log: the datoms it produced,
+;; its tempids and the id counters after it, as EDN. A connection rebuilds
+;; its database by replaying those rows onto the bootstrap database
 ;; (nitomic.db/apply-tx-record); the transaction logic never runs twice, so
 ;; replay gives back exactly the ids and values the transaction produced.
 ;;
-;; Writers serialize on SQLite's write lock (BEGIN IMMEDIATE): a writer
-;; first applies the rows other processes committed, then transacts against
-;; that database and appends its own row before releasing the lock. Without a
-;; transactor running, that makes every process its own transactor, one at a
-;; time. With one running (nitomic.transactor, which keeps a heartbeat in
-;; nitomic_meta), peers put their transaction data on nitomic_queue instead
-;; and the transactor alone writes the log.
+;; Writers serialize on the storage's write lock (SQLite's BEGIN IMMEDIATE,
+;; or a PostgreSQL transaction-scoped advisory lock): a writer first applies
+;; the rows others committed, then transacts against that database and
+;; appends its own row before releasing the lock. Without a transactor
+;; running, that makes every process its own transactor, one at a time.
+;; With one running (nitomic.transactor), peers put their transaction data
+;; on nitomic_queue instead and the transactor alone writes the log.
+;;
+;; PostgreSQL also pushes: every commit, queued transaction and result
+;; sends a NOTIFY on the nitomic channel, so waiting (wait!) returns as soon
+;; as something happens. SQLite has no such channel; there, wait! sleeps
+;; briefly and callers look again.
 (ns nitomic.storage
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
-            [clonim.sqlite :as sql]
+            [clonim.postgres :as pg]
+            [clonim.sqlite :as sqlite]
             [nitomic.db :as ndb]
             [nitomic.types :as types]))
 
 (def ^:private format-version "1")
 
-(def ^:private schema
-  "create table if not exists nitomic_meta (
-     key text primary key, value text not null);
-   create table if not exists nitomic_databases (
-     name text primary key);
-   create table if not exists nitomic_log (
-     db text not null, t integer not null, record text not null,
-     primary key (db, t));
-   create table if not exists nitomic_queue (
-     id integer primary key autoincrement, db text not null,
-     tx_data text not null, status text not null default 'pending',
-     result text)")
+(def ^:private schemas
+  {:sqlite
+   "create table if not exists nitomic_meta (
+      key text primary key, value text not null);
+    create table if not exists nitomic_databases (
+      name text primary key);
+    create table if not exists nitomic_log (
+      db text not null, t integer not null, record text not null,
+      primary key (db, t));
+    create table if not exists nitomic_queue (
+      id integer primary key autoincrement, db text not null,
+      tx_data text not null, status text not null default 'pending',
+      result text)"
+   :postgres
+   "create table if not exists nitomic_meta (
+      key text primary key, value text not null);
+    create table if not exists nitomic_databases (
+      name text primary key);
+    create table if not exists nitomic_log (
+      db text not null, t bigint not null, record text not null,
+      primary key (db, t));
+    create table if not exists nitomic_queue (
+      id bigserial primary key, db text not null,
+      tx_data text not null, status text not null default 'pending',
+      result text)"})
 
-(defn- open-store [path]
-  (let [h (sql/open path)]
-    ;; readers keep reading while a writer commits
-    (sql/query h "PRAGMA journal_mode=WAL")
-    (sql/execute! h schema)
-    (sql/execute! h "insert or ignore into nitomic_meta (key, value) values ('format', ?)"
-                  [format-version])
-    (let [v (:value (first (sql/query h "select value from nitomic_meta where key = 'format'")))]
+;; PostgreSQL advisory locks are named by two ints: this one, then 1 for
+;; the transactor's claim and 2 for the write lock.
+(def ^:private lock-space 1852404845)
+(def ^:private channel "nitomic")
+
+;; ------------------------------------------------------------ backends
+(defn- dollar-params
+  "SQL written with ? placeholders, numbered $1, $2, ... for PostgreSQL."
+  [sql]
+  (let [parts (str/split sql "?" -1)]
+    (apply str (first parts)
+           (map-indexed (fn [i part] (str "$" (inc i) part)) (rest parts)))))
+
+(defn- query [{:keys [kind handle]} sql params]
+  (if (= kind :postgres)
+    (pg/query handle (dollar-params sql) params)
+    (sqlite/query handle sql params)))
+
+(defn- execute! [{:keys [kind handle]} sql params]
+  (if (= kind :postgres)
+    (pg/execute! handle (dollar-params sql) params)
+    (sqlite/execute! handle sql params)))
+
+(defn- notify! [{:keys [kind] :as s} payload]
+  (when (= kind :postgres)
+    (query s "select pg_notify(?, ?) as sent" [channel payload])))
+
+(defn with-write-lock
+  "Call (f) holding the storage's write lock, committing what it wrote if it
+  returns and rolling it back if it throws."
+  [{:keys [kind handle] :as s} f]
+  (if (= kind :postgres)
+    (pg/transaction handle
+      (fn []
+        (query s (str "select pg_advisory_xact_lock(" lock-space ", 2) as locked") nil)
+        (f)))
+    (sqlite/transaction handle f)))
+
+(defn- transaction
+  "Call (f) in a transaction, without the write lock."
+  [{:keys [kind handle]} f]
+  (if (= kind :postgres)
+    (pg/transaction handle f)
+    (sqlite/transaction handle f)))
+
+(defn wait!
+  "Wait until another process may have changed the storage, or timeout-ms
+  passes. PostgreSQL returns as soon as a NOTIFY arrives; SQLite, which
+  can't be told, sleeps a moment."
+  [{:keys [kind handle]} timeout-ms]
+  (if (= kind :postgres)
+    (pg/notifications handle timeout-ms)
+    (Thread/sleep (min timeout-ms 2)))
+  nil)
+
+(defn push?
+  "True if this storage tells waiting processes about changes."
+  [s]
+  (= :postgres (:kind s)))
+
+(defn- drain!
+  "Drop notifications that arrived while nobody was waiting."
+  [{:keys [kind handle]}]
+  (when (= kind :postgres) (pg/notifications handle 0)))
+
+;; ------------------------------------------------------------ opening
+(defn- location
+  "{:kind :conninfo} of a storage given as a JDBC URL (jdbc:sqlite:<path>
+  or jdbc:postgresql://...) or as a bare SQLite path."
+  [spec]
+  (cond
+    (str/starts-with? spec "jdbc:sqlite:")
+    {:kind :sqlite :conninfo (subs spec (count "jdbc:sqlite:"))}
+    (str/starts-with? spec "jdbc:postgresql:")
+    {:kind :postgres :conninfo (subs spec (count "jdbc:"))}
+    (str/starts-with? spec "jdbc:")
+    (throw (ex-info (str "nitomic's sql storage is SQLite or PostgreSQL, not " spec)
+                    {:db/error :db.error/invalid-db-uri}))
+    :else {:kind :sqlite :conninfo spec}))
+
+(defn connect-store
+  "A new connection to the storage named by spec (see location), creating
+  its tables on first use. Most callers want the shared one from store."
+  [spec]
+  (let [{:keys [kind conninfo]} (location spec)
+        handle (if (= kind :postgres) (pg/connect conninfo) (sqlite/open conninfo))
+        s {:kind kind :path spec :handle handle}]
+    (if (= kind :postgres)
+      (do
+        ;; one creator at a time: concurrent CREATE TABLE IF NOT EXISTS races
+        (with-write-lock s (fn [] (pg/execute! handle (schemas :postgres))))
+        (pg/listen handle channel))
+      (do
+        ;; readers keep reading while a writer commits
+        (sqlite/query handle "PRAGMA journal_mode=WAL")
+        (sqlite/execute! handle (schemas :sqlite))))
+    (execute! s "insert into nitomic_meta (key, value) values ('format', ?) on conflict do nothing"
+              [format-version])
+    (let [v (:value (first (query s "select value from nitomic_meta where key = 'format'" nil)))]
       (when-not (= v format-version)
-        (sql/close h)
-        (throw (ex-info (str "Unsupported nitomic storage format " v " in " path)
+        (throw (ex-info (str "Unsupported nitomic storage format " v " in " spec)
                         {:db/error :db.error/unsupported-storage-format}))))
-    {:path path :handle h}))
+    s))
+
+(defn close-store [{:keys [kind handle]}]
+  (if (= kind :postgres) (pg/close handle) (sqlite/close handle)))
 
 (def ^:private stores (atom {}))
 
 (defn store
-  "The storage at path, opened (and created) on first use."
-  [path]
-  (or (get @stores path)
-      (let [s (open-store path)]
-        (swap! stores assoc path s)
+  "The shared connection to the storage named by spec, opened on first use."
+  [spec]
+  (or (get @stores spec)
+      (let [s (connect-store spec)]
+        (swap! stores assoc spec s)
         s)))
 
 ;; ------------------------------------------------------------ catalog
-(defn exists? [{h :handle} name]
-  (seq (sql/query h "select 1 as x from nitomic_databases where name = ?" [name])))
+(defn exists? [s name]
+  (seq (query s "select 1 as x from nitomic_databases where name = ?" [name])))
 
 (defn create!
   "True if the database was created, false if it already existed."
-  [{h :handle} name]
-  (pos? (:changes (sql/execute! h "insert or ignore into nitomic_databases (name) values (?)"
-                                [name]))))
+  [s name]
+  (pos? (:changes (execute! s "insert into nitomic_databases (name) values (?) on conflict do nothing"
+                            [name]))))
 
-(defn delete! [{h :handle} name]
-  (sql/transaction h
+(defn delete! [s name]
+  (with-write-lock s
     (fn []
-      (sql/execute! h "delete from nitomic_log where db = ?" [name])
-      (sql/execute! h "delete from nitomic_databases where name = ?" [name])))
+      (execute! s "delete from nitomic_log where db = ?" [name])
+      (execute! s "delete from nitomic_queue where db = ?" [name])
+      (execute! s "delete from nitomic_databases where name = ?" [name])))
   true)
 
 (defn rename!
   "True if name existed and now goes by new-name."
-  [{h :handle :as s} name new-name]
-  (sql/transaction h
+  [s name new-name]
+  (with-write-lock s
     (fn []
       (if (and (exists? s name) (not (exists? s new-name)))
         (do
-          (sql/execute! h "update nitomic_databases set name = ? where name = ?" [new-name name])
-          (sql/execute! h "update nitomic_log set db = ? where db = ?" [new-name name])
+          (execute! s "update nitomic_databases set name = ? where name = ?" [new-name name])
+          (execute! s "update nitomic_log set db = ? where db = ?" [new-name name])
           true)
         false))))
 
-(defn names [{h :handle}]
-  (mapv :name (sql/query h "select name from nitomic_databases order by name")))
+(defn names [s]
+  (mapv :name (query s "select name from nitomic_databases order by name" nil)))
 
 ;; ------------------------------------------------------------ the log
 (defn records-after
   "The logged transactions of a database with t greater than t, in order."
-  [{h :handle} name t]
+  [s name t]
+  (drain! s)
   (mapv (fn [row] (edn/read-string (:record row)))
-        (sql/query h "select record from nitomic_log where db = ? and t > ? order by t"
-                   [name t])))
+        (query s "select record from nitomic_log where db = ? and t > ? order by t"
+               [name t])))
 
 (defn load-db
   "A database rebuilt from its log."
@@ -127,49 +243,74 @@
 
 (defn append!
   "Record a transaction from its report. Call inside with-write-lock."
-  [{h :handle} name {:keys [db-after tempids]}]
+  [s name {:keys [db-after tempids]}]
   (let [{:keys [t tx inst data]} (peek (:log db-after))]
     (check-storable data)
-    (sql/execute! h "insert into nitomic_log (db, t, record) values (?, ?, ?)"
-                  [name t (pr-str {:t t :tx tx :inst inst :data data
-                                   :tempids tempids
-                                   :next-t (:next-t db-after)
-                                   :next-db-id (:next-db-id db-after)})])))
-
-(defn with-write-lock
-  "Call (f) holding the storage's write lock, committing what it wrote if it
-  returns and rolling it back if it throws."
-  [{h :handle} f]
-  (sql/transaction h f))
+    (execute! s "insert into nitomic_log (db, t, record) values (?, ?, ?)"
+              [name t (pr-str {:t t :tx tx :inst inst :data data
+                               :tempids tempids
+                               :next-t (:next-t db-after)
+                               :next-db-id (:next-db-id db-after)})])
+    ;; delivered when the transaction commits
+    (notify! s (str "log " t))))
 
 ;; ------------------------------------------------------------ transactor
-(def heartbeat-ms
-  "How often a transactor records that it is alive. Peers treat one as gone
-  after three missed heartbeats."
-  1000)
+;; A transactor claims a storage for as long as it runs. On PostgreSQL the
+;; claim is a session advisory lock, which the server drops the moment the
+;; transactor's connection goes away. SQLite has nothing like it, so there
+;; the transactor records a heartbeat every heartbeat-ms and counts as gone
+;; after three missed ones.
+(def heartbeat-ms 1000)
 
 (defn- now-ms [] (System/currentTimeMillis))
 
-(defn transactor
-  "{:id :at} of the transactor that last recorded a heartbeat, or nil."
-  [{h :handle}]
-  (when-let [v (:value (first (sql/query h "select value from nitomic_meta where key = 'transactor'")))]
+(defn- heartbeat [s]
+  (when-let [v (:value (first (query s "select value from nitomic_meta where key = 'transactor'" nil)))]
     (let [[id at] (str/split v " ")]
       {:id id :at (Long/parseLong at)})))
 
 (defn transactor-alive?
-  "True while some transactor's heartbeat is fresh."
+  "True while a transactor has the storage."
   [s]
-  (let [tr (transactor s)]
-    (boolean (and tr (< (- (now-ms) (:at tr)) (* 3 heartbeat-ms))))))
+  (if (push? s)
+    (boolean (seq (query s (str "select 1 as x from pg_locks
+                                 where locktype = 'advisory' and granted
+                                   and classid = " lock-space " and objid = 1 and objsubid = 2
+                                   and database = (select oid from pg_database
+                                                   where datname = current_database())")
+                         nil)))
+    (let [hb (heartbeat s)]
+      (boolean (and hb (< (- (now-ms) (:at hb)) (* 3 heartbeat-ms)))))))
 
-(defn heartbeat! [{h :handle} id]
-  (sql/execute! h "insert or replace into nitomic_meta (key, value) values ('transactor', ?)"
-                [(str id " " (now-ms))]))
+(defn heartbeat! [s id]
+  (when-not (push? s)
+    (execute! s "insert into nitomic_meta (key, value) values ('transactor', ?)
+                 on conflict (key) do update set value = excluded.value"
+              [(str id " " (now-ms))])))
 
-(defn clear-heartbeat! [{h :handle} id]
-  (sql/execute! h "delete from nitomic_meta where key = 'transactor' and value like ?"
-                [(str id " %")]))
+(defn claim!
+  "Make this connection the storage's transactor; throws if another one
+  has it."
+  [s id]
+  (let [taken (fn []
+                (throw (ex-info "Another transactor is running on this storage"
+                                {:db/error :db.error/transactor-running})))]
+    (if (push? s)
+      (when-not (:claimed (first (query s (str "select pg_try_advisory_lock(" lock-space
+                                               ", 1) as claimed") nil)))
+        (taken))
+      (with-write-lock s
+        (fn []
+          (when (transactor-alive? s) (taken))
+          (heartbeat! s id))))))
+
+(defn release!
+  "Give up the claim made with claim!."
+  [s id]
+  (if (push? s)
+    (query s (str "select pg_advisory_unlock(" lock-space ", 1) as released") nil)
+    (execute! s "delete from nitomic_meta where key = 'transactor' and value like ?"
+              [(str id " %")])))
 
 ;; ------------------------------------------------------------ the queue
 ;; Transaction data crosses processes as EDN. Tempids and datoms have no EDN
@@ -211,33 +352,36 @@
 
 (defn enqueue!
   "Queue transaction data for the transactor; returns the queue id."
-  [{h :handle} name tx-data]
-  (:last-insert-rowid
-   (sql/execute! h "insert into nitomic_queue (db, tx_data) values (?, ?)"
-                 [name (pr-str (encode tx-data))])))
+  [s name tx-data]
+  (let [id (:id (first (query s "insert into nitomic_queue (db, tx_data) values (?, ?) returning id"
+                              [name (pr-str (encode tx-data))])))]
+    (notify! s (str "queue " id))
+    id))
 
 (defn pending
   "Queued transactions not yet processed, oldest first: [{:id :db :tx-data}]."
-  [{h :handle} limit]
+  [s limit]
+  (drain! s)
   (mapv (fn [r] {:id (:id r) :db (:db r) :tx-data (decode (edn/read-string (:tx_data r)))})
-        (sql/query h "select id, db, tx_data from nitomic_queue where status = 'pending'
-                      order by id limit ?" [limit])))
+        (query s "select id, db, tx_data from nitomic_queue where status = 'pending'
+                  order by id limit ?" [limit])))
 
-(defn still-pending? [{h :handle} id]
-  (seq (sql/query h "select 1 as x from nitomic_queue where id = ? and status = 'pending'" [id])))
+(defn still-pending? [s id]
+  (seq (query s "select 1 as x from nitomic_queue where id = ? and status = 'pending'" [id])))
 
 (defn finish!
   "Record the outcome of a queued transaction: :done with {:t n}, or :failed
   with {:message :data}. Call inside with-write-lock."
-  [{h :handle} id status result]
-  (sql/execute! h "update nitomic_queue set status = ?, result = ? where id = ?"
-                [(name status) (pr-str result) id]))
+  [s id status result]
+  (execute! s "update nitomic_queue set status = ?, result = ? where id = ?"
+            [(name status) (pr-str result) id])
+  (notify! s (str "done " id)))
 
 (defn queue-result
   "{:status :done|:failed :result ...} once the transactor has processed a
   queued transaction, nil while it waits."
-  [{h :handle} id]
-  (let [r (first (sql/query h "select status, result from nitomic_queue where id = ?" [id]))]
+  [s id]
+  (let [r (first (query s "select status, result from nitomic_queue where id = ?" [id]))]
     (when (and r (not= "pending" (:status r)))
       {:status (keyword (:status r))
        :result (when (:result r) (edn/read-string (:result r)))})))
@@ -245,24 +389,27 @@
 (defn cancel!
   "Withdraw a queued transaction the transactor hasn't taken. True if it was
   withdrawn, false if it had already been processed."
-  [{h :handle} id]
-  (pos? (:changes (sql/execute! h "delete from nitomic_queue where id = ? and status = 'pending'"
-                                [id]))))
+  [s id]
+  (pos? (:changes (execute! s "delete from nitomic_queue where id = ? and status = 'pending'"
+                            [id]))))
 
-(defn forget! [{h :handle} id]
-  (sql/execute! h "delete from nitomic_queue where id = ?" [id]))
+(defn forget! [s id]
+  (execute! s "delete from nitomic_queue where id = ?" [id]))
 
 ;; ------------------------------------------------------------ URIs
 (defn parse-uri
-  "{:protocol :name :path} of datomic:sql://<name>?jdbc:sqlite:<path>."
+  "{:protocol :name :path} of datomic:sql://<name>?<jdbc-url>, where :path
+  is the JDBC URL naming the storage."
   [uri]
   (let [rest-uri (subs uri (+ 3 (str/index-of uri "://")))
         q (str/index-of rest-uri "?")
         jdbc (when q (subs rest-uri (inc q)))]
-    (when-not (and jdbc (str/starts-with? jdbc "jdbc:sqlite:"))
-      (throw (ex-info (str "nitomic's sql storage is SQLite: expected "
-                           "datomic:sql://<name>?jdbc:sqlite:<path>, got " uri)
+    (when-not (and jdbc (or (str/starts-with? jdbc "jdbc:sqlite:")
+                            (str/starts-with? jdbc "jdbc:postgresql:")))
+      (throw (ex-info (str "nitomic's sql storage is SQLite or PostgreSQL: expected "
+                           "datomic:sql://<name>?jdbc:sqlite:<path> or "
+                           "datomic:sql://<name>?jdbc:postgresql://<host>/<db>..., got " uri)
                       {:db/error :db.error/invalid-db-uri})))
     {:protocol "sql"
      :name (subs rest-uri 0 q)
-     :path (subs jdbc (count "jdbc:sqlite:"))}))
+     :path jdbc}))

@@ -7,27 +7,27 @@
 ;; and records its outcome for the peer that queued it. Peers learn of new
 ;; transactions from the log, as they do without a transactor.
 ;;
-;; It keeps a heartbeat in the storage. Peers queue only while it is fresh,
-;; and write the log themselves otherwise, so stopping the transactor (or
-;; losing it) leaves every database writable.
+;; It claims the storage while it runs (see nitomic.storage/claim!). Peers
+;; queue only while the claim holds, and write the log themselves otherwise,
+;; so stopping the transactor (or losing it) leaves every database
+;; writable. On PostgreSQL it sleeps until a NOTIFY says something was
+;; queued; on SQLite it looks again every couple of milliseconds.
 (ns nitomic.transactor
   (:require [nitomic.db :as ndb]
             [nitomic.storage :as storage]
             [nitomic.tx :as tx]))
 
 (defn start
-  "Claim the storage at path. Throws if another transactor's heartbeat is
-  fresh."
-  [path]
-  (let [s (storage/store path)
+  "Claim a storage, named by a JDBC URL or a SQLite path, on a connection of
+  the transactor's own. Throws if another transactor has it."
+  [spec]
+  (let [s (storage/connect-store spec)
         id (str (random-uuid))]
-    (storage/with-write-lock s
-      (fn []
-        (when (storage/transactor-alive? s)
-          (throw (ex-info (str "Another transactor is running on " path)
-                          {:db/error :db.error/transactor-running
-                           :transactor (storage/transactor s)})))
-        (storage/heartbeat! s id)))
+    (try
+      (storage/claim! s id)
+      (catch Exception e
+        (storage/close-store s)
+        (throw e)))
     {:store s :id id :dbs (atom {}) :beat (atom (System/currentTimeMillis))}))
 
 (defn- current-db
@@ -74,18 +74,20 @@
 (defn stop!
   "Give up the storage: peers go back to writing the log themselves."
   [tr]
-  (storage/clear-heartbeat! (:store tr) (:id tr))
+  (storage/release! (:store tr) (:id tr))
+  (storage/close-store (:store tr))
   nil)
 
 (defn run
-  "Serve the storage at path until (stop?) returns true, polling the queue
-  every poll-ms while it is idle."
-  ([path] (run path {}))
-  ([path {:keys [poll-ms stop?] :or {poll-ms 2 stop? (fn [] false)}}]
-   (let [tr (start path)]
+  "Serve a storage until (stop?) returns true. While the queue is empty it
+  waits for a peer to queue something (at most idle-ms at a time, so that
+  it keeps its heartbeat and checks stop?)."
+  ([spec] (run spec {}))
+  ([spec {:keys [idle-ms stop?] :or {idle-ms 500 stop? (fn [] false)}}]
+   (let [tr (start spec)]
      (try
        (loop []
          (when-not (stop?)
-           (when (zero? (step! tr)) (Thread/sleep poll-ms))
+           (when (zero? (step! tr)) (storage/wait! (:store tr) idle-ms))
            (recur)))
        (finally (stop! tr))))))

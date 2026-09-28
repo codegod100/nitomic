@@ -1,20 +1,20 @@
-;; Durable databases in SQLite: datomic:sql://<name>?jdbc:sqlite:<path>.
+;; Durable databases: datomic:sql://<name>?<jdbc-url>, in SQLite or, with
+;; NITOMIC_TEST_STORAGE=jdbc:postgresql://..., PostgreSQL (test/support.clj).
 ;; Expected output is nitomic's own (test/expected/storage.out): Datomic's
 ;; SQL storage needs a transactor and a JDBC database, so there is no JVM
 ;; reference to record.
 (require '[datomic.api :as d]
-         '[clojure.java.io :as io])
+         '[test.support :as support])
 
-(def path (str (System/getProperty "java.io.tmpdir") "/nitomic-storage-test.db"))
-(defn clean! []
-  (doseq [f [path (str path "-wal") (str path "-shm")]] (io/delete-file f true)))
-(clean!)
-(def uri (str "datomic:sql://people?jdbc:sqlite:" path))
+(def storage (support/storage "storage-test"))
+(defn db-uri [db-name] (support/uri storage db-name))
+(support/clean! storage)
+(def uri (db-uri "people"))
 
 ;; the catalog lives in the file
 (println (d/create-database uri) (d/create-database uri))          ; true false
-(d/create-database (str "datomic:sql://other?jdbc:sqlite:" path))
-(println (d/get-database-names (str "datomic:sql://*?jdbc:sqlite:" path)))
+(d/create-database (db-uri "other"))
+(println (d/get-database-names (db-uri "*")))
 
 (def conn (d/connect uri))
 @(d/transact conn [{:db/ident :person/name :db/valueType :db.type/string
@@ -69,13 +69,13 @@
 (println (d/basis-t (d/db conn)) (= (d/db conn) (d/db peer-b)))
 
 ;; rename and delete act on the storage
-(println (d/rename-database (str "datomic:sql://other?jdbc:sqlite:" path) "renamed"))
-(println (d/get-database-names (str "datomic:sql://*?jdbc:sqlite:" path)))
-(println (d/delete-database (str "datomic:sql://renamed?jdbc:sqlite:" path)))
-(println (try (d/connect (str "datomic:sql://renamed?jdbc:sqlite:" path))
+(println (d/rename-database (db-uri "other") "renamed"))
+(println (d/get-database-names (db-uri "*")))
+(println (d/delete-database (db-uri "renamed")))
+(println (try (d/connect (db-uri "renamed"))
               (catch Exception e (:db/error (ex-data e)))))
 
-;; only SQLite storage is supported
-(println (try (d/create-database "datomic:sql://x?jdbc:postgresql://localhost/datomic")
+;; only SQLite and PostgreSQL storage are supported
+(println (try (d/create-database "datomic:sql://x?jdbc:mysql://localhost/datomic")
               (catch Exception e (:db/error (ex-data e)))))
-(clean!)
+(support/clean! storage)

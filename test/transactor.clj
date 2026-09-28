@@ -3,15 +3,13 @@
 ;; processes the queue, and deref returns the report. Expected output is
 ;; nitomic's own (test/expected/transactor.out).
 (require '[datomic.api :as d]
-         '[clojure.java.io :as io]
          '[nitomic.storage :as storage]
-         '[nitomic.transactor :as transactor])
+         '[nitomic.transactor :as transactor]
+         '[test.support :as support])
 
-(def path (str (System/getProperty "java.io.tmpdir") "/nitomic-transactor-test.db"))
-(defn clean! []
-  (doseq [f [path (str path "-wal") (str path "-shm")]] (io/delete-file f true)))
-(clean!)
-(def uri (str "datomic:sql://people?jdbc:sqlite:" path))
+(def path (support/storage "transactor-test"))
+(support/clean! path)
+(def uri (support/uri path "people"))
 (d/create-database uri)
 (def conn (d/connect uri))
 (def s (storage/store path))
@@ -70,4 +68,4 @@
   (transactor/stop! tr2)
   ;; the peer withdraws it
   (println (try @f (catch Exception e (:db/error (ex-data e)))) (queued)))
-(clean!)
+(support/clean! path)
