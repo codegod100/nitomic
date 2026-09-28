@@ -26,7 +26,7 @@ clonim build hello.clj --source-path path/to/nitomic/src   # native binary
 
 ## Documentation
 
-The [nitomic book](book/) covers installation and walks through Datomic's
+The [nitomic book](https://codegod100.github.io/nitomic/) ([source](book/)) covers installation and walks through Datomic's
 getting-started example step by step. Build it with
 [mdBook](https://rust-lang.github.io/mdBook/):
 

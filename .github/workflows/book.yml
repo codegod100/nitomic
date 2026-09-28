@@ -3,6 +3,12 @@ name: Book
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+# One Pages deployment at a time; don't cancel one that is in progress.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -23,7 +29,22 @@ jobs:
       - name: Build the book
         run: mdbook build book
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-pages-artifact@v3
         with:
-          name: book
           path: book/book
+
+  # Publish to GitHub Pages from main only; pull requests and other branches
+  # just build.
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

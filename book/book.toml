@@ -9,6 +9,7 @@ src = "src"
 build-dir = "book"
 
 [output.html]
+site-url = "/nitomic/"
 git-repository-url = "https://github.com/codegod100/nitomic"
 edit-url-template = "https://github.com/codegod100/nitomic/edit/main/book/{path}"
 additional-css = []
