@@ -7,6 +7,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    # the storage tests run a second time against this server
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     env:
       # clonim revision providing the language features nitomic uses
       CLONIM_REF: main
@@ -28,7 +39,7 @@ jobs:
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
 
       - name: Install runtime dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libpcre3
+        run: sudo apt-get update && sudo apt-get install --yes libpcre3 libsqlite3-0 libpq5
 
       - name: Build clonim
         run: |
@@ -36,4 +47,9 @@ jobs:
           nim c --hints:off --warnings:off -o:bin/clonim src/clonim.nim
 
       - name: Run tests
+        run: CLONIM=$PWD/clonim/bin/clonim test/run.sh
+
+      - name: Run tests with PostgreSQL storage
+        env:
+          NITOMIC_TEST_STORAGE: jdbc:postgresql://localhost:5432/postgres?user=postgres&password=postgres
         run: CLONIM=$PWD/clonim/bin/clonim test/run.sh

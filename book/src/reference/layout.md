@@ -9,6 +9,8 @@
 | `src/nitomic/query.clj` | Datalog, rules and aggregates |
 | `src/nitomic/pull.clj` | the pull API |
 | `src/nitomic/entity.clj` | lazy entities (a `deftype` over `ILookup`/`Seqable`) |
+| `src/nitomic/storage.clj` | durable storage in SQLite or PostgreSQL: the catalog, transaction log and queue, replay, locks and notifications |
+| `src/nitomic/transactor.clj` | the transactor: serves a storage's queue and writes its log |
 | `src/nitomic/types.clj` | datoms and tempids |
 | `src/nitomic/bootstrap.clj` | Datomic's bootstrap datoms |
 

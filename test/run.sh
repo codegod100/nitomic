@@ -7,7 +7,7 @@
 set -u
 cd "$(dirname "$0")/.."
 clonim="${CLONIM:-clonim}"
-programs=(examples/seattle/getting_started.clj test/features.clj test/native.clj)
+programs=(examples/seattle/getting_started.clj test/features.clj test/native.clj test/storage.clj test/transactor.clj)
 fail=0
 for f in "${programs[@]}"; do
   name=$(basename "$f" .clj)

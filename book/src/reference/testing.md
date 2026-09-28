@@ -12,6 +12,8 @@ native output must match the recorded JVM output line for line.
 | `examples/seattle/getting_started.clj` | Datomic's getting-started walkthrough over the Seattle data (the [Getting started](../getting-started/overview.md) part of this book) | recorded on Datomic Pro |
 | `test/features.clj` | the rest of the API, including error cases | recorded on Datomic Pro |
 | `test/native.clj` | nitomic-only extensions, such as `d/register-fn!` | written for nitomic |
+| `test/storage.clj` | durable storage (SQLite, or PostgreSQL via `NITOMIC_TEST_STORAGE`): replay, two connections sharing a storage, the catalog | written for nitomic |
+| `test/transactor.clj` | the transactor: queued transactions, errors, tempids, stopping and withdrawal | written for nitomic |
 
 ## Running the tests
 
@@ -29,10 +31,17 @@ diffs its output against `test/expected/<name>.out`, and prints `ok` or
 ok   getting_started
 ok   features
 ok   native
+ok   storage
+ok   transactor
 ```
 
-CI (`.github/workflows/test.yml`) builds clonim from its `main` branch with
-Nim 2.2.12 and runs the same script on every push and pull request.
+The storage and transactor tests use a SQLite file unless
+`NITOMIC_TEST_STORAGE` names another storage. Given a PostgreSQL URL, they
+must print exactly the same output.
+
+CI (`.github/workflows/test.yml`) builds clonim with Nim 2.2.12 and runs the
+same script on every push and pull request twice: once as is, and once
+against a PostgreSQL service container.
 
 ## Re-recording the expected output
 

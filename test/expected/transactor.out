@@ -1,0 +1,15 @@
+false 0
+true
+:db.error/transactor-running
+3 1000
+3 0
+{ada 17592186045418, -1 17592186045419}
+17592186045419
+4 1000 1001
+:db.error/not-an-entity
+Barbara
+true
+{e 17592186045423} {e 17592186045423}
+:db.error/not-storable
+false 1008 0
+:db.error/transactor-unavailable 0
