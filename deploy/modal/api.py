@@ -27,10 +27,23 @@ NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 EDN = "application/edn"
 
 
-class Peer:
-    """One nitomic-peer process, restarted if it dies."""
+# Answers that mean the peer lost its database connection (the server
+# restarted, or a Neon compute scaled to zero), rather than a problem with
+# the request: SQLSTATE class 08, admin shutdown (57P01-57P03), or libpq's
+# own messages for a dropped connection.
+CONNECTION_LOST = re.compile(
+    r':pg/sqlstate "(08|57P0)|server closed the connection|closed unexpectedly'
+    r'|no connection to the server|connection is closed|Cannot connect|could not connect'
+    r'|terminating connection')
 
-    def __init__(self, binary: str, env: dict):
+
+class Peer:
+    """One nitomic-peer process, restarted if it dies or loses its database.
+
+    env is the process environment, or a function returning it, called each
+    time the process starts."""
+
+    def __init__(self, binary: str, env):
         self.binary = binary
         self.env = env
         self.proc = None
@@ -38,25 +51,52 @@ class Peer:
 
     def _ensure(self):
         if self.proc is None or self.proc.poll() is not None:
+            env = self.env() if callable(self.env) else self.env
             self.proc = subprocess.Popen(
                 [self.binary],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                env=self.env,
+                env=env,
                 text=True,
                 encoding="utf-8",
             )
 
-    def call(self, request: str) -> str:
-        with self.lock:
-            self._ensure()
+    def _roundtrip(self, request: str) -> str:
+        self._ensure()
+        try:
             self.proc.stdin.write(request + "\n" + END + "\n")
             self.proc.stdin.flush()
             line = self.proc.stdout.readline()
-            if not line:
-                self.proc = None
-                raise HTTPException(503, "nitomic peer exited")
-            return line.rstrip("\n")
+        except (BrokenPipeError, OSError):
+            line = ""
+        if not line:
+            self._kill()
+            raise HTTPException(503, "nitomic peer exited")
+        return line.rstrip("\n")
+
+    def call(self, request: str, retry: bool = True) -> str:
+        """The peer's answer. If it lost its database connection, the peer
+        is restarted (reconnecting, at the database's current address) and,
+        when retry is true, the request is sent once more. Pass retry=False
+        for writes: a connection can drop after the server committed, and a
+        retry would apply the transaction twice."""
+        with self.lock:
+            answer = self._roundtrip(request)
+            if not answer.startswith("{:ok ") and CONNECTION_LOST.search(answer):
+                self._kill()
+                if not retry:
+                    raise HTTPException(
+                        503, "lost the database connection; the transaction may or "
+                             "may not have been committed")
+                answer = self._roundtrip(request)
+            return answer
+
+    def _kill(self):
+        if self.proc is not None:
+            if self.proc.poll() is None:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc = None
 
     def close(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -102,7 +142,8 @@ def create_app(peer: Peer) -> FastAPI:
     @app.post("/db/{name}/transact")
     async def transact(name: str, request: Request):
         tx = await body(request)
-        return answer(peer.call("{:op :transact :db %s :tx-data\n%s\n}" % (db_name(name), tx)))
+        return answer(peer.call("{:op :transact :db %s :tx-data\n%s\n}" % (db_name(name), tx),
+                                retry=False))
 
     @app.post("/db/{name}/q")
     async def q(name: str, request: Request, arg: list[str] = Query(default=[])):
@@ -131,4 +172,12 @@ def storage_from_env() -> str:
         url = "postgresql://" + url[len("postgres://"):]
     if not url.startswith("postgresql://"):
         raise RuntimeError("set DATABASE_URL (postgresql://...) or NITOMIC_STORAGE")
+    # Notice a connection whose far end went away (a Neon compute scaling to
+    # zero, say) within a minute rather than hanging on it, and don't wait
+    # forever for a server that is waking up.
+    extra = [p for p in ["connect_timeout=15", "keepalives=1", "keepalives_idle=30",
+                         "keepalives_interval=10", "keepalives_count=3"]
+             if p.split("=")[0] + "=" not in url]
+    if extra:
+        url += ("&" if "?" in url else "?") + "&".join(extra)
     return "jdbc:" + url

@@ -3,8 +3,9 @@
     modal deploy deploy/modal/app.py        # from the repository root
 
 Needs a Modal Secret named nitomic-postgres holding DATABASE_URL, a direct
-(not pooled) PostgreSQL connection string such as
-postgresql://user:pass@host:5432/db?sslmode=require.
+(not pooled) PostgreSQL connection string, such as a Neon project's
+postgresql://user:pass@ep-....aws.neon.tech/neondb?sslmode=require (see
+README.md in this directory).
 
 - `api` serves deploy/modal/api.py. Each container runs one nitomic peer
   process, which keeps its databases in memory and catches up from
@@ -26,6 +27,8 @@ import time
 import modal
 
 CLONIM_REF = os.environ.get("CLONIM_REF", "main")
+# Read when deploying and baked into the image, so containers agree.
+TRANSACTOR = os.environ.get("NITOMIC_TRANSACTOR", "1") != "0"
 NIM_VERSION = "2.2.12"
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -52,6 +55,7 @@ image = (
         "cd /opt/nitomic && /opt/clonim/bin/clonim build script/transactor.clj"
         " --source-path src -o /usr/local/bin/nitomic-transactor",
     )
+    .env({"NITOMIC_TRANSACTOR": "1" if TRANSACTOR else "0"})
     .add_local_python_source("api")
 )
 
@@ -71,10 +75,12 @@ def nitomic_env() -> dict:
 def web():
     import api
 
-    return api.create_app(api.Peer("/usr/local/bin/nitomic-peer", nitomic_env()))
+    # the peer reconnects after its database drops the connection (Neon
+    # does when its compute scales to zero); nitomic_env is read each time
+    return api.create_app(api.Peer("/usr/local/bin/nitomic-peer", nitomic_env))
 
 
-if os.environ.get("NITOMIC_TRANSACTOR", "1") != "0":
+if TRANSACTOR:
 
     @app.cls(secrets=[secret], min_containers=1, max_containers=1, timeout=24 * 60 * 60)
     class Transactor:
@@ -90,7 +96,14 @@ if os.environ.get("NITOMIC_TRANSACTOR", "1") != "0":
 
         def _supervise(self):
             while not self.stopping:
-                self.proc = subprocess.Popen(["/usr/local/bin/nitomic-transactor"], env=nitomic_env())
+                try:
+                    env = nitomic_env()
+                except Exception as e:
+                    print(f"nitomic-transactor: no database configured: {e}")
+                    time.sleep(5)
+                    continue
+                # it exits when it loses its connection, and reconnects
+                self.proc = subprocess.Popen(["/usr/local/bin/nitomic-transactor"], env=env)
                 self.proc.wait()
                 if not self.stopping:
                     print(f"nitomic-transactor exited with {self.proc.returncode}; restarting")

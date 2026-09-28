@@ -1,7 +1,8 @@
 # nitomic on Modal
 
 `app.py` deploys nitomic to [Modal](https://modal.com) as two pieces, backed by
-PostgreSQL from any provider:
+PostgreSQL. [Neon](https://neon.com) works well: its storage outlives any
+compute, and the compute scales to zero when idle.
 
 - **`web`**: an HTTP API (`api.py`). Each container runs one long-lived
   nitomic peer (`script/peer_server.clj`), which keeps its databases in
@@ -11,32 +12,59 @@ PostgreSQL from any provider:
   restarted if it exits. It's optional: without it, each peer writes the
   log itself under PostgreSQL's advisory lock.
 
-## Deploying
+## Deploying with Neon
 
-1. Create a PostgreSQL database and copy its **direct** connection string,
-   for example `postgresql://user:pass@host:5432/db?sslmode=require`. Don't
-   use a transaction-mode pooler (PgBouncer, Neon's `-pooler` host,
-   Supabase's port 6543): it breaks `LISTEN` and the transactor's session
-   lock.
-2. Store it as a Modal Secret named `nitomic-postgres`, under the key
+1. **Create a Neon project.** Use the console at [console.neon.tech](https://console.neon.tech),
+   or the CLI (`npx neon@latest`, then `neon login` and `neon projects create`).
+2. **Copy the direct connection string, not the pooled one.** In the console's
+   *Connect* dialog, turn **Connection pooling off**; the host must not
+   contain `-pooler`. It looks like
+   `postgresql://neondb_owner:...@ep-cool-name-123456.us-east-2.aws.neon.tech/neondb?sslmode=require`.
+   Neon's pooler runs PgBouncer in transaction mode, which doesn't support
+   `LISTEN`/`NOTIFY` or session advisory locks. nitomic relies on both, for
+   push and for the transactor's claim.
+3. **Store it as a Modal Secret** named `nitomic-postgres`, under the key
    `DATABASE_URL`:
 
    ```bash
    modal secret create nitomic-postgres DATABASE_URL='postgresql://...'
    ```
 
-3. Deploy from the repository root:
+4. **Deploy** from the repository root:
 
    ```bash
    pip install modal
-   modal deploy deploy/modal/app.py
+   modal deploy deploy/modal/app.py                         # API and transactor
+   NITOMIC_TRANSACTOR=0 modal deploy deploy/modal/app.py    # API only
    ```
 
    The first deploy builds the image: Nim, clonim (`CLONIM_REF`, default
    `main`), and the `nitomic-peer` and `nitomic-transactor` binaries.
-   Set `NITOMIC_TRANSACTOR=0` to deploy without the transactor.
 
-Modal prints the API's URL.
+Modal prints the API's URL. Any other PostgreSQL works the same way: give
+`DATABASE_URL` its direct connection string.
+
+### Neon and scale to zero
+
+Neon suspends a compute after 5 minutes without activity, and wakes it on
+the next connection.
+
+- **Dropped connections.** A suspend drops open connections, and nitomic
+  recovers from that:
+  - The API's peer reconnects on its next request. A read is retried at
+    once.
+  - A transaction whose connection dropped answers 503 (it may or may not
+    have committed); check, then resend.
+  - The transactor exits and is restarted, reconnecting.
+  - `api.py` adds TCP keepalives and a connect timeout to `DATABASE_URL` (unless
+    it already sets them), so a dead connection is noticed within a minute.
+- **The transactor keeps the compute awake.** It looks at its queue a
+  couple of times a second, so while it runs the compute never suspends and
+  bills around the clock. On Neon's free plan, or for a quiet app, deploy
+  with `NITOMIC_TRANSACTOR=0`: peers then write the log themselves, and
+  the compute sleeps between requests.
+- **Scaling down.** Modal also scales idle API containers down. A peer's
+  first request after that replays the log from Neon.
 
 ## The API
 
