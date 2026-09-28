@@ -19,11 +19,8 @@ jobs:
           --health-cmd pg_isready --health-interval 5s
           --health-timeout 5s --health-retries 10
     env:
-      # clonim revision providing the language features nitomic uses. The
-      # SQLite and PostgreSQL primitives (clonim.sqlite, clonim.postgres) are
-      # on this branch until codegod100/clonim#18 merges; then this goes back
-      # to main.
-      CLONIM_REF: claude/affectionate-pasteur-ajl4yy
+      # clonim revision providing the language features nitomic uses
+      CLONIM_REF: main
     steps:
       - uses: actions/checkout@v4
 

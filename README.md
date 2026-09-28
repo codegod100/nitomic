@@ -261,7 +261,7 @@ nitomic uses Clojure features that clonim gained for this port:
 They are in clonim `main` as of
 [codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1). Durable
 storage and the transactor also need `clonim.sqlite`, `clonim.postgres`,
-`System/getenv` and `Thread/sleep`, from
+`System/getenv` and `Thread/sleep`, in `main` as of
 [codegod100/clonim#18](https://github.com/codegod100/clonim/pull/18).
 
 ## Testing
