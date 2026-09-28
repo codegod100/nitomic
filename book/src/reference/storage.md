@@ -30,6 +30,11 @@ libpq accepts works, TLS options included.
   releasing the lock. The lock is `BEGIN IMMEDIATE` on SQLite and a
   transaction-scoped advisory lock on PostgreSQL. So each process acts as
   its own transactor, one at a time.
+- **Two round trips per write on PostgreSQL.** A write sends two
+  multi-statement queries. The first begins, takes the lock, checks for a
+  transactor, and reads what others committed. The second appends,
+  notifies, and commits. Latency to the server matters more than anything
+  else here, so keep the database in the same region as the peers.
 - **Seeing other writers.** `d/db`, `sync` and reading a `tx-report-queue`
   pick up other writers' transactions, with their `:tempids`.
 - **Push.** On PostgreSQL every commit sends a `NOTIFY`, so a process

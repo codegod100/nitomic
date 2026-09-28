@@ -137,23 +137,29 @@
            (let [m (assoc m (:basis-t (:db-after report)) report)]
              (if (> (count m) recent-reports) (dissoc m (apply min (keys m))) m)))))
 
+(defn- apply-records!
+  "Apply transactions others stored (log records, in order), reporting each
+  to the connection's tx-report-queues as Datomic delivers every
+  transaction to every peer."
+  [conn records]
+  (let [state (:state conn)]
+    (doseq [rec records]
+      (let [before @state
+            after (ndb/apply-tx-record before rec)
+            report {:db-before before
+                    :db-after after
+                    :tx-data (mapv types/datom (:data rec))
+                    :tempids (:tempids rec {})}]
+        (reset! state after)
+        (remember! conn report)
+        (publish! conn report)))))
+
 (defn- catch-up!
   "Apply the transactions stored since this connection's basis, by other
-  connections or by the transactor, reporting each to its tx-report-queues
-  as Datomic delivers every transaction to every peer."
+  connections or by the transactor."
   [conn]
   (when-let [s (:store conn)]
-    (let [state (:state conn)]
-      (doseq [rec (storage/records-after s (:name conn) (:basis-t @state))]
-        (let [before @state
-              after (ndb/apply-tx-record before rec)
-              report {:db-before before
-                      :db-after after
-                      :tx-data (mapv types/datom (:data rec))
-                      :tempids (:tempids rec {})}]
-          (reset! state after)
-          (remember! conn report)
-          (publish! conn report)))))
+    (apply-records! conn (storage/records-after s (:name conn) (:basis-t @(:state conn)))))
   conn)
 
 (defn db
@@ -217,6 +223,28 @@
       (isDone [_] (boolean (or @outcome (storage/queue-result (:store conn) id))))
       (isCancelled [_] false))))
 
+(defn- write-postgres
+  "Write a transaction to PostgreSQL storage in two round trips (see
+  nitomic.storage/begin-write!): the report, or :queue when a transactor has
+  the storage and should take it instead."
+  [conn tx-data]
+  (let [s (:store conn)
+        state (:state conn)
+        {:keys [transactor? records]}
+        (try (storage/begin-write! s (:name conn) (:basis-t @state))
+             (catch Exception e (storage/abort-write! s) (throw e)))]
+    (if transactor?
+      (do (storage/abort-write! s) :queue)
+      (try
+        ;; others' transactions, committed before we got the lock
+        (apply-records! conn records)
+        (let [report (tx/transact @state tx-data (now))]
+          (storage/commit-write! s (:name conn) report)
+          report)
+        (catch Exception e
+          (storage/abort-write! s)
+          (throw e))))))
+
 (defn transact
   "Submit a transaction. Returns a future of the transaction report.
 
@@ -225,10 +253,22 @@
   connection writes the log itself."
   [conn tx-data]
   (let [state (:state conn)
-        s (:store conn)]
+        s (:store conn)
+        queue! (fn [] (queued-future conn (storage/enqueue! s (:name conn) tx-data)))]
     (try
-      (if (and s (storage/transactor-alive? s))
-        (queued-future conn (storage/enqueue! s (:name conn) tx-data))
+      (cond
+        (and s (storage/push? s))
+        (let [report (write-postgres conn tx-data)]
+          (if (= report :queue)
+            (queue!)
+            (do (reset! state (:db-after report))
+                (publish! conn report)
+                (realized-future report nil))))
+
+        (and s (storage/transactor-alive? s))
+        (queue!)
+
+        :else
         (let [report
               (if s
                 ;; Holding the write lock, catch up with other writers, then
