@@ -14,7 +14,10 @@ compute, and the compute scales to zero when idle.
 
 ## Deploying with Neon
 
-1. **Create a Neon project.** Use the console at [console.neon.tech](https://console.neon.tech),
+1. **Create a Neon project** in the region nearest Modal's, `aws-us-east-1`.
+   Writes cross the network twice, so distance shows directly: from
+   `us-west-2`, writes took about 0.55 s; from `us-east-1`, about 0.2 s.
+   Use the console at [console.neon.tech](https://console.neon.tech),
    or the CLI (`npx neon@latest`, then `neon login` and `neon projects create`).
 2. **Copy the direct connection string, not the pooled one.** In the console's
    *Connect* dialog, turn **Connection pooling off**; the host must not
@@ -69,7 +72,9 @@ the next connection.
 ## The API
 
 Bodies and answers are EDN (`application/edn`). Errors are HTTP 400 with
-`{:error "..." :data {...}}`.
+`{:error "..." :data {...}}`. A request the peer doesn't answer within
+`NITOMIC_PEER_TIMEOUT` seconds (default 30) gets 504, and the peer is
+replaced. For a transaction that means the outcome is unknown, as with 503.
 
 | request | body | answer |
 |---|---|---|

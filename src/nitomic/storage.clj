@@ -241,18 +241,85 @@
                            (pr-str [e a]) " (transaction functions need datomic:mem)")
                       {:db/error :db.error/not-storable :e e :a a})))))
 
-(defn append!
-  "Record a transaction from its report. Call inside with-write-lock."
-  [s name {:keys [db-after tempids]}]
+(defn- log-record
+  "[t record-text] of the transaction that produced a report."
+  [{:keys [db-after tempids]}]
   (let [{:keys [t tx inst data]} (peek (:log db-after))]
     (check-storable data)
-    (execute! s "insert into nitomic_log (db, t, record) values (?, ?, ?)"
-              [name t (pr-str {:t t :tx tx :inst inst :data data
-                               :tempids tempids
-                               :next-t (:next-t db-after)
-                               :next-db-id (:next-db-id db-after)})])
+    [t (pr-str {:t t :tx tx :inst inst :data data
+                :tempids tempids
+                :next-t (:next-t db-after)
+                :next-db-id (:next-db-id db-after)})]))
+
+(defn append!
+  "Record a transaction from its report. Call inside with-write-lock."
+  [s name report]
+  (let [[t record] (log-record report)]
+    (execute! s "insert into nitomic_log (db, t, record) values (?, ?, ?)" [name t record])
     ;; delivered when the transaction commits
     (notify! s (str "log " t))))
+
+;; The transactor's claim, as a PostgreSQL condition (see claim!).
+(def ^:private transactor-claimed-sql
+  (str "exists (select 1 from pg_locks
+                where locktype = 'advisory' and granted
+                  and classid = " lock-space " and objid = 1 and objsubid = 2
+                  and database = (select oid from pg_database
+                                  where datname = current_database()))"))
+
+;; ------------------------------------------------------------ writing in two round trips
+;; On PostgreSQL a write is two round trips to the server rather than one per
+;; statement: each is a multi-statement query, which PostgreSQL runs in order
+;; in one go. Every statement in it takes its own snapshot, so the log read
+;; after the lock sees everything committed before the lock was granted.
+;; Values go in as literals, since a multi-statement query can't take
+;; parameters (see sql-string).
+(defn- sql-string
+  "x as a PostgreSQL string literal. Dollar quoting takes the text as it
+  is, so nothing needs escaping; the tag is one the text doesn't contain."
+  [x]
+  (let [text (str x)
+        tag (first (remove #(str/includes? text (str "$" % "$"))
+                           (map #(str "n" %) (range))))]
+    (str "$" tag "$" text "$" tag "$")))
+
+(defn begin-write!
+  "PostgreSQL, in one round trip: begin a transaction, take the write lock,
+  and return {:transactor? :records}: whether a transactor has the storage,
+  and the database's log records after t, in order. Finish with
+  commit-write! or abort-write!."
+  [{:keys [handle] :as s} name t]
+  (drain! s)
+  (let [rows (pg/query handle
+                       (str "begin; "
+                            "select pg_advisory_xact_lock(" lock-space ", 2); "
+                            "select " transactor-claimed-sql " as transactor, l.record"
+                            " from (values (1)) as one"
+                            " left join nitomic_log l on l.db = " (sql-string name)
+                            " and l.t > " (long t)
+                            " order by l.t")
+                       nil)]
+    {:transactor? (boolean (:transactor (first rows)))
+     :records (vec (keep (fn [row] (when-let [r (:record row)] (edn/read-string r))) rows))}))
+
+(defn commit-write!
+  "PostgreSQL, in one round trip: append the transaction a report describes,
+  tell listeners, and commit what begin-write! began."
+  [{:keys [handle]} name report]
+  (let [[t record] (log-record report)]
+    (pg/execute! handle
+                 (str "insert into nitomic_log (db, t, record) values ("
+                      (sql-string name) ", " (long t) ", " (sql-string record) "); "
+                      "select pg_notify(" (sql-string channel) ", " (sql-string (str "log " t)) "); "
+                      "commit")
+                 nil)))
+
+(defn abort-write!
+  "Roll back what begin-write! began. Never throws: the connection it would
+  complain about may be the reason for the rollback."
+  [{:keys [handle]}]
+  (try (pg/execute! handle "rollback" nil) (catch Exception _ nil))
+  nil)
 
 ;; ------------------------------------------------------------ transactor
 ;; A transactor claims a storage for as long as it runs. On PostgreSQL the
@@ -273,12 +340,7 @@
   "True while a transactor has the storage."
   [s]
   (if (push? s)
-    (boolean (seq (query s (str "select 1 as x from pg_locks
-                                 where locktype = 'advisory' and granted
-                                   and classid = " lock-space " and objid = 1 and objsubid = 2
-                                   and database = (select oid from pg_database
-                                                   where datname = current_database())")
-                         nil)))
+    (:alive (first (query s (str "select " transactor-claimed-sql " as alive") nil)))
     (let [hb (heartbeat s)]
       (boolean (and hb (< (- (now-ms) (:at hb)) (* 3 heartbeat-ms)))))))
 

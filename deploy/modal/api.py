@@ -15,11 +15,13 @@ Errors come back as HTTP 400 with {:error "..." :data {...}}.
 """
 
 import os
+import queue
 import re
 import subprocess
 import threading
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 END = "%%end%%"
@@ -43,10 +45,13 @@ class Peer:
     env is the process environment, or a function returning it, called each
     time the process starts."""
 
-    def __init__(self, binary: str, env):
+    def __init__(self, binary: str, env, timeout: float = None):
         self.binary = binary
         self.env = env
+        # how long one request may take before the peer is presumed stuck
+        self.timeout = timeout or float(os.environ.get("NITOMIC_PEER_TIMEOUT", "30"))
         self.proc = None
+        self.lines = None
         self.lock = threading.Lock()
 
     def _ensure(self):
@@ -60,15 +65,28 @@ class Peer:
                 text=True,
                 encoding="utf-8",
             )
+            # a thread reads the answers, so waiting for one can time out
+            self.lines = queue.Queue()
+            threading.Thread(target=self._read, args=(self.proc, self.lines), daemon=True).start()
+
+    @staticmethod
+    def _read(proc, lines):
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put("")  # the peer exited
 
     def _roundtrip(self, request: str) -> str:
         self._ensure()
         try:
             self.proc.stdin.write(request + "\n" + END + "\n")
             self.proc.stdin.flush()
-            line = self.proc.stdout.readline()
+            line = self.lines.get(timeout=self.timeout)
         except (BrokenPipeError, OSError):
             line = ""
+        except queue.Empty:
+            self._kill()
+            raise HTTPException(504, f"nitomic peer didn't answer within {self.timeout:g} s; "
+                                     "a transaction may or may not have been committed")
         if not line:
             self._kill()
             raise HTTPException(503, "nitomic peer exited")
@@ -142,19 +160,21 @@ def create_app(peer: Peer) -> FastAPI:
     @app.post("/db/{name}/transact")
     async def transact(name: str, request: Request):
         tx = await body(request)
-        return answer(peer.call("{:op :transact :db %s :tx-data\n%s\n}" % (db_name(name), tx),
-                                retry=False))
+        return answer(await run_in_threadpool(
+            peer.call, "{:op :transact :db %s :tx-data\n%s\n}" % (db_name(name), tx), False))
 
     @app.post("/db/{name}/q")
     async def q(name: str, request: Request, arg: list[str] = Query(default=[])):
         query = await body(request)
         args = "[" + "\n".join(arg) + "]"
-        return answer(peer.call("{:op :q :db %s :args %s :query\n%s\n}" % (db_name(name), args, query)))
+        return answer(await run_in_threadpool(
+            peer.call, "{:op :q :db %s :args %s :query\n%s\n}" % (db_name(name), args, query)))
 
     @app.post("/db/{name}/pull")
     async def pull(name: str, request: Request):
         spec = await body(request)
-        return answer(peer.call("{:op :pull :db %s :spec\n%s\n}" % (db_name(name), spec)))
+        return answer(await run_in_threadpool(
+            peer.call, "{:op :pull :db %s :spec\n%s\n}" % (db_name(name), spec)))
 
     @app.get("/health")
     def health():

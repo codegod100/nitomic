@@ -65,4 +65,4 @@ jobs:
           clonim/bin/clonim build script/peer_server.clj --source-path src -o nitomic-peer
           pip install fastapi httpx pytest
           cd deploy/modal
-          NITOMIC_PEER=$GITHUB_WORKSPACE/nitomic-peer python -m pytest -q -p no:cacheprovider test_api.py
+          NITOMIC_PEER=$GITHUB_WORKSPACE/nitomic-peer python -m pytest -q -p no:cacheprovider test_api.py test_peer.py
