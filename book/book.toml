@@ -1,0 +1,14 @@
+[book]
+title = "nitomic"
+description = "Datomic's peer API on clonim: native binaries, no JVM"
+authors = ["nitomic contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/codegod100/nitomic"
+edit-url-template = "https://github.com/codegod100/nitomic/edit/main/book/{path}"
+additional-css = []
