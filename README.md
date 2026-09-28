@@ -88,8 +88,11 @@ So the ids a program sees are the ids Datomic would give it.
 
 ## Differences from Datomic
 
-- **Storage is memory.** Every URI protocol (`mem`, `dev`, `sql`, …) names an
-  in-process database. Nothing is persisted, and there is no transactor.
+- **Storage is memory or SQLite.** `datomic:sql://<name>?jdbc:sqlite:<path>`
+  keeps databases in a SQLite file (see [Durable storage](#durable-storage)).
+  Every other URI protocol (`mem`, `dev`, `ddb`, …) names an in-process
+  database that is gone when the process exits. There is no separate
+  transactor process: each process takes SQLite's write lock to transact.
 - **No runtime code compilation.** Database functions can't be Clojure source
   strings. `:db/fn` holds a Clojure fn, which `d/function` passes through.
   Query functions are found in a built-in table of `clojure.core` and string
@@ -107,6 +110,41 @@ So the ids a program sees are the ids Datomic would give it.
   collections. An entity prints as `{:db/id n}`, and a touched entity prints
   as its attribute map.
 
+## Durable storage
+
+A `datomic:sql` URI naming a SQLite file makes a database durable:
+
+```clojure
+(def uri "datomic:sql://hello?jdbc:sqlite:/var/lib/app/datomic.db")
+(d/create-database uri)
+(def conn (d/connect uri))
+```
+
+The file is created on first use and can hold any number of databases.
+`create-database`, `delete-database`, `rename-database` and
+`get-database-names` (with `datomic:sql://*?jdbc:sqlite:<path>`) act on the
+catalog in the file.
+
+- **What is stored.** Each transaction is stored as one log row: the datoms
+  it produced and the id counters after it. `connect` replays the log to
+  rebuild the database, so every id and value comes back as the transaction
+  made it. The transaction logic never runs twice.
+- **Several processes.** Any number of processes can share a file.
+  `transact` takes SQLite's write lock, applies what other processes have
+  committed since it last looked, transacts, and stores the result before
+  releasing the lock. So each process acts as its own transactor, one at a
+  time.
+- **Seeing other writers.** `d/db`, `sync` and reading a `tx-report-queue`
+  pick up other writers' transactions. Those transactions reach the queue as
+  reports with empty `:tempids`.
+- **Transaction functions.** A `:db/fn` holds a Clojure fn, which can't be
+  written to a file. Installing one in a stored database fails with
+  `:db.error/not-storable`.
+- **Releasing.** `release` drops a stored connection from the cache, so the
+  next `connect` rebuilds it from the file.
+- **Requirements.** Storage uses clonim's `clonim.sqlite`, which loads
+  `libsqlite3` when a stored database is first used.
+
 ## Layout
 
 | file | what it does |
@@ -118,6 +156,7 @@ So the ids a program sees are the ids Datomic would give it.
 | `src/nitomic/query.clj` | Datalog, rules and aggregates |
 | `src/nitomic/pull.clj` | the pull API |
 | `src/nitomic/entity.clj` | lazy entities (a `deftype` over `ILookup`/`Seqable`) |
+| `src/nitomic/storage.clj` | durable storage: the SQLite catalog and transaction log, replay |
 | `src/nitomic/types.clj` | datoms and tempids |
 | `src/nitomic/bootstrap.clj` | Datomic's bootstrap datoms |
 
@@ -139,7 +178,9 @@ nitomic uses Clojure features that clonim gained for this port:
 - a set of collection functions.
 
 They are in clonim `main` as of
-[codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1).
+[codegod100/clonim#1](https://github.com/codegod100/clonim/pull/1). Durable
+storage also needs `clonim.sqlite`, from
+[codegod100/clonim#18](https://github.com/codegod100/clonim/pull/18).
 
 ## Testing
 
@@ -153,7 +194,9 @@ against `test/expected/`:
 - `examples/seattle/getting_started.clj` is Datomic's own getting-started
   walkthrough over the Seattle sample data;
 - `test/features.clj` goes through the rest of the API, including error cases;
-- `test/native.clj` covers the native-only extensions.
+- `test/native.clj` covers the native-only extensions;
+- `test/storage.clj` covers durable storage: replay, two connections sharing
+  a file, and the catalog.
 
 The expected outputs of the first two were recorded on the JVM against Datomic
 Pro 1.0.7705 by `script/reference.sh`. Re-record them from any distribution

@@ -1,40 +1,53 @@
 ;; datomic.api — the Datomic peer API, reimplemented for clonim.
 ;;
-;; Databases live in process memory, as with datomic:mem:// URIs; other
-;; storage protocols in a URI are accepted and behave the same way. Everything
-;; else follows the peer library: immutable database values, transactions
-;; that report :db-before/:db-after/:tx-data/:tempids, Datalog queries with
-;; rules, pull, lazy entities, and as-of/since/history views.
+;; datomic:sql://<name>?jdbc:sqlite:<path> databases are durable, kept in a
+;; SQLite file by nitomic.storage. Every other URI names a database in process
+;; memory, as with datomic:mem://. Everything else follows the peer library:
+;; immutable database values, transactions that report
+;; :db-before/:db-after/:tx-data/:tempids, Datalog queries with rules, pull,
+;; lazy entities, and as-of/since/history views.
 (ns datomic.api
   (:require [clojure.string :as str]
             [nitomic.db :as ndb]
             [nitomic.entity :as entity]
             [nitomic.pull :as npull]
             [nitomic.query :as query]
+            [nitomic.storage :as storage]
             [nitomic.tx :as tx]
             [nitomic.types :as types]))
 
 ;; ------------------------------------------------------------ databases
+;; In-memory databases by name, and connections to stored ones by
+;; [path name].
 (def ^:private databases (atom {}))
+(def ^:private sql-conns (atom {}))
 
-(defn- db-name
-  "The database name in datomic:<protocol>://<host...>/<name> or
+(defn- parse-uri
+  "{:protocol :name}, plus :path for datomic:sql://<name>?jdbc:sqlite:<path>.
+  Other URIs are datomic:<protocol>://<host...>/<name> or
   datomic:mem://<name>."
   [uri]
-  (when-not (and (string? uri) (str/starts-with? uri "datomic:"))
+  (when-not (and (string? uri) (str/starts-with? uri "datomic:")
+                 (str/index-of uri "://"))
     (throw (ex-info (str "Invalid database URI: " (pr-str uri))
                     {:db/error :db.error/invalid-db-uri})))
-  (let [rest-uri (subs uri (inc (str/index-of uri "://")))
-        path (subs rest-uri 2)
-        parts (str/split path "/")]
-    (last parts)))
+  (let [protocol (subs uri 8 (str/index-of uri "://"))]
+    (if (= protocol "sql")
+      (storage/parse-uri uri)
+      (let [path (subs uri (+ 3 (str/index-of uri "://")))]
+        {:protocol protocol :name (last (str/split path "/"))}))))
+
+(defn- sql? [u] (= "sql" (:protocol u)))
 
 (defn create-database
   "Create a database. True if it was created, false if it already existed."
   [uri]
-  (let [n (db-name uri)]
-    (if (contains? @databases n)
-      false
+  (let [u (parse-uri uri)
+        n (:name u)]
+    (cond
+      (sql? u) (storage/create! (storage/store (:path u)) n)
+      (contains? @databases n) false
+      :else
       (do
         (swap! databases assoc n
                {:uri uri
@@ -44,33 +57,97 @@
         true))))
 
 (defn delete-database [uri]
-  (let [n (db-name uri)]
-    (swap! databases dissoc n)
-    true))
+  (let [u (parse-uri uri)
+        n (:name u)]
+    (if (sql? u)
+      (do (swap! sql-conns dissoc [(:path u) n])
+          (storage/delete! (storage/store (:path u)) n))
+      (do (swap! databases dissoc n)
+          true))))
 
 (defn rename-database [uri new-name]
-  (let [n (db-name uri)
-        conn (get @databases n)]
-    (when conn
-      (swap! databases #(-> % (dissoc n) (assoc new-name (assoc conn :name new-name)))))
-    (some? conn)))
+  (let [u (parse-uri uri)
+        n (:name u)]
+    (if (sql? u)
+      (do (swap! sql-conns dissoc [(:path u) n])
+          (storage/rename! (storage/store (:path u)) n new-name))
+      (let [conn (get @databases n)]
+        (when conn
+          (swap! databases #(-> % (dissoc n) (assoc new-name (assoc conn :name new-name)))))
+        (some? conn)))))
 
-(defn get-database-names [uri-pattern]
-  (seq (sort (keys @databases))))
+(defn get-database-names
+  "Database names in the storage a URI pattern names (its database name is
+  ignored, as with Datomic's datomic:sql://*?...), or in memory."
+  [uri-pattern]
+  (let [u (parse-uri uri-pattern)]
+    (seq (if (sql? u)
+           (storage/names (storage/store (:path u)))
+           (sort (keys @databases))))))
+
+(defn- connect-sql [uri {:keys [path name]}]
+  (or (get @sql-conns [path name])
+      (let [s (storage/store path)]
+        (when-not (storage/exists? s name)
+          (throw (ex-info (str "Could not find " name " in catalog")
+                          {:db/error :db.error/db-not-found})))
+        (let [conn {:uri uri
+                    :name name
+                    :state (atom (storage/load-db s name))
+                    :queues (atom [])
+                    :store s}]
+          (swap! sql-conns assoc [path name] conn)
+          conn))))
 
 (defn connect
   "A connection to an existing database."
   [uri]
-  (let [conn (get @databases (db-name uri))]
-    (when-not conn
-      (throw (ex-info (str "Could not find " (db-name uri) " in catalog")
-                      {:db/error :db.error/db-not-found})))
-    conn))
+  (let [u (parse-uri uri)]
+    (if (sql? u)
+      (connect-sql uri u)
+      (let [conn (get @databases (:name u))]
+        (when-not conn
+          (throw (ex-info (str "Could not find " (:name u) " in catalog")
+                          {:db/error :db.error/db-not-found})))
+        conn))))
 
-(defn release [conn] nil)
+(defn release
+  "Forget a stored database's connection: the next connect rebuilds it from
+  storage. The released connection keeps working. In-memory connections
+  are the database itself, so this does nothing to them."
+  [conn]
+  (when (:store conn)
+    (swap! sql-conns dissoc [(get-in conn [:store :path]) (:name conn)]))
+  nil)
+
 (defn shutdown [shutdown-clojure] nil)
 
-(defn db "The current database value of a connection." [conn] @(:state conn))
+(defn- publish! [conn report]
+  (doseq [q @(:queues conn)] (swap! q conj report)))
+
+(defn- catch-up!
+  "Apply the transactions other connections have stored since this one's
+  basis, reporting each to its tx-report-queues as Datomic delivers every
+  transaction to every peer."
+  [conn]
+  (when-let [s (:store conn)]
+    (let [state (:state conn)]
+      (doseq [rec (storage/records-after s (:name conn) (:basis-t @state))]
+        (let [before @state
+              after (ndb/apply-tx-record before rec)]
+          (reset! state after)
+          (publish! conn {:db-before before
+                          :db-after after
+                          :tx-data (mapv types/datom (:data rec))
+                          :tempids {}})))))
+  conn)
+
+(defn db
+  "The current database value of a connection, including what other
+  connections to its storage have committed."
+  [conn]
+  (catch-up! conn)
+  @(:state conn))
 
 ;; ------------------------------------------------------------ futures
 (defn- realized-future
@@ -91,11 +168,22 @@
 (defn transact
   "Submit a transaction. Returns a future of the transaction report."
   [conn tx-data]
-  (let [state (:state conn)]
+  (let [state (:state conn)
+        s (:store conn)]
     (try
-      (let [report (tx/transact @state tx-data (now))]
+      (let [report
+            (if s
+              ;; Holding the write lock, catch up with other writers, then
+              ;; store this transaction before anyone else can write.
+              (storage/with-write-lock s
+                (fn []
+                  (catch-up! conn)
+                  (let [report (tx/transact @state tx-data (now))]
+                    (storage/append! s (:name conn) (:db-after report))
+                    report)))
+              (tx/transact @state tx-data (now)))]
         (reset! state (:db-after report))
-        (doseq [q @(:queues conn)] (swap! q conj report))
+        (publish! conn report)
         (realized-future report nil))
       (catch Exception e
         (realized-future nil e)))))
@@ -119,11 +207,14 @@
 
 (defn tx-report-queue
   "A queue that receives the report of every transaction on the connection
-  from now on. Supports .poll, .take, .peek, .isEmpty, .size and .clear."
+  from now on. Supports .poll, .take, .peek, .isEmpty, .size and .clear.
+  For a stored database, reading the queue first picks up what other
+  connections have committed."
   [conn]
   (let [items (atom [])
+        pending (fn [] (catch-up! conn) @items)
         pop! (fn []
-               (let [x (first @items)]
+               (let [x (first (pending))]
                  (swap! items #(vec (rest %)))
                  x))]
     (swap! (:queues conn) conj items)
@@ -131,12 +222,12 @@
       java.util.concurrent.BlockingQueue
       (poll [_] (pop!))
       (take [_] (pop!))
-      (peek [_] (first @items))
-      (isEmpty [_] (empty? @items))
-      (size [_] (count @items))
+      (peek [_] (first (pending)))
+      (isEmpty [_] (empty? (pending)))
+      (size [_] (count (pending)))
       (clear [_] (reset! items []))
       clojure.lang.Seqable
-      (seq [_] (seq @items)))))
+      (seq [_] (seq (pending))))))
 
 (defn remove-tx-report-queue [conn]
   (reset! (:queues conn) [])

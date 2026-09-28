@@ -8,8 +8,10 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     env:
-      # clonim revision providing the language features nitomic uses
-      CLONIM_REF: main
+      # clonim revision providing the language features nitomic uses. The
+      # SQLite primitives (clonim.sqlite) are on this branch until
+      # codegod100/clonim#18 merges; then this goes back to main.
+      CLONIM_REF: claude/affectionate-pasteur-ajl4yy
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +30,7 @@ jobs:
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
 
       - name: Install runtime dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libpcre3
+        run: sudo apt-get update && sudo apt-get install --yes libpcre3 libsqlite3-0
 
       - name: Build clonim
         run: |

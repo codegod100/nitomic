@@ -223,6 +223,29 @@
 (defn new-db [id]
   (assoc bootstrap-db :id id))
 
+;; ------------------------------------------------------------ replay
+(defn apply-tx-record
+  "Apply a transaction that was already made, as recorded in storage:
+  {:t :tx :inst :data [[e a v tx added] ...] :next-t :next-db-id}. The
+  datoms go into the indexes in the order the transaction produced them,
+  with reference attributes judged by the schema before it (an attribute
+  can't be used in the transaction that installs it), then the entities
+  whose schema changed are refreshed, as the transaction itself did."
+  [db {:keys [t tx inst data next-t next-db-id]}]
+  (let [w (reduce (fn [w [e a v _ added]]
+                    (if added
+                      (index-add w (ref-attr? db a) e a v tx)
+                      (index-remove w (ref-attr? db a) e a v)))
+                  db data)
+        schema-es (distinct (for [[e a] data :when (contains? schema-attr-ids a)] e))
+        w (reduce refresh-entity w schema-es)]
+    (assoc w
+           :basis-t t
+           :next-t next-t
+           :next-db-id next-db-id
+           :last-inst (inst-ms inst)
+           :log (conj (:log db) {:t t :tx tx :inst inst :data data}))))
+
 ;; ------------------------------------------------------------ datoms
 (defn current-datoms
   "Every current datom of a database as [e a v tx] vectors."

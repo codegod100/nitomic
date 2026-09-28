@@ -28,8 +28,10 @@ create-database: true
 one with that name already exists. `connect` returns a connection, which is
 what you transact against and take database values from.
 
-> **nitomic:** every URI protocol names an in-memory database in the same
-> process. There is no transactor and nothing is written to disk.
+> **nitomic:** `datomic:mem` and every other protocol except `sql` name an
+> in-memory database in the same process. To keep a database on disk, use a
+> SQLite URI such as `datomic:sql://seattle?jdbc:sqlite:seattle.db` (see
+> [Durable storage](../reference/storage.md)).
 
 ## Reading EDN with tempid literals
 

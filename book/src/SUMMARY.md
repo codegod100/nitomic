@@ -21,6 +21,7 @@
 # Reference
 
 - [What works](reference/support.md)
+- [Durable storage](reference/storage.md)
 - [Differences from Datomic](reference/differences.md)
 - [How it is tested](reference/testing.md)
 - [Source layout](reference/layout.md)

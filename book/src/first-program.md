@@ -49,9 +49,9 @@ this way, the full Seattle walkthrough runs in about 1.3 seconds.
 The program uses nothing but `datomic.api`, so the same file also runs on the
 JVM against Datomic Pro. A few things to notice:
 
-- **`datomic:mem://hello`** names an in-memory database. In nitomic every URI
-  protocol (`mem`, `dev`, `sql`, ...) names an in-process, in-memory
-  database; nothing is persisted.
+- **`datomic:mem://hello`** names an in-memory database, gone when the
+  program exits. `datomic:sql://hello?jdbc:sqlite:hello.db` would keep it in
+  a SQLite file instead (see [Durable storage](reference/storage.md)).
 - **`d/transact` returns a future.** Dereferencing it with `@` waits for the
   result, a map with `:db-before`, `:db-after`, `:tx-data` and `:tempids`. A
   failed transaction throws when you dereference it.

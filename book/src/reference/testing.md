@@ -12,6 +12,7 @@ native output must match the recorded JVM output line for line.
 | `examples/seattle/getting_started.clj` | Datomic's getting-started walkthrough over the Seattle data (the [Getting started](../getting-started/overview.md) part of this book) | recorded on Datomic Pro |
 | `test/features.clj` | the rest of the API, including error cases | recorded on Datomic Pro |
 | `test/native.clj` | nitomic-only extensions, such as `d/register-fn!` | written for nitomic |
+| `test/storage.clj` | durable storage in SQLite: replay, two connections sharing a file, the catalog | written for nitomic |
 
 ## Running the tests
 
@@ -29,6 +30,7 @@ diffs its output against `test/expected/<name>.out`, and prints `ok` or
 ok   getting_started
 ok   features
 ok   native
+ok   storage
 ```
 
 CI (`.github/workflows/test.yml`) builds clonim from its `main` branch with
